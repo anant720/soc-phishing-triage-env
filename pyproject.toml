@@ -1,0 +1,57 @@
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "soc-triage-env"
+version = "0.1.0"
+description = "Autonomous SOC Phishing Triage Environment — OpenEnv hackathon submission"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    # OpenEnv core framework
+    "openenv-core>=0.2.0",
+    # Server
+    "fastapi>=0.104.0",
+    "uvicorn>=0.24.0",
+    "pydantic>=2.0.0",
+    # Client / HTTP
+    "requests>=2.25.0",
+    "httpx>=0.28.1",
+    "websockets>=15.0.1",
+    # LLM inference (baseline agent)
+    "openai>=2.7.2",
+    # CLI / config
+    "typer>=0.9.0",
+    "rich>=13.0.0",
+    "pyyaml>=6.0",
+    "python-dotenv>=1.0.0",
+    "tomli>=2.3.0",
+    "tomli-w>=1.2.0",
+    # HuggingFace deployment
+    "huggingface_hub>=0.20.0",
+]
+
+[project.scripts]
+server = "server.app:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21",
+    "ruff>=0.14.0",
+    "httpx>=0.28.1",   # for FastAPI TestClient
+]
+
+[tool.setuptools]
+packages = ["server"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E", "F", "W"]
+ignore = ["E501"]

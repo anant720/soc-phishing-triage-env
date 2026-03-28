@@ -1,0 +1,564 @@
+{
+  "domains": [
+    {
+      "domain": "paypa1-alerts.com",
+      "reputation_score": 0.97,
+      "known_malware_families": ["TA505", "FIN7"],
+      "first_seen": "2025-11-03",
+      "last_seen": "2026-03-27",
+      "tags": ["phishing", "credential-harvesting", "paypal-lookalike"]
+    },
+    {
+      "domain": "paypa1-secure-verify.ru",
+      "reputation_score": 0.99,
+      "known_malware_families": ["Emotet"],
+      "first_seen": "2025-12-15",
+      "last_seen": "2026-03-28",
+      "tags": ["phishing", "credential-harvesting", "russia-hosted"]
+    },
+    {
+      "domain": "microsoft-365-mfa.net",
+      "reputation_score": 0.91,
+      "known_malware_families": [],
+      "first_seen": "2026-01-10",
+      "last_seen": "2026-03-25",
+      "tags": ["phishing", "microsoft-lookalike", "mfa-bypass"]
+    },
+    {
+      "domain": "amazon.com",
+      "reputation_score": 0.01,
+      "known_malware_families": [],
+      "first_seen": "1994-11-01",
+      "last_seen": "2026-03-28",
+      "tags": ["legitimate", "e-commerce", "trusted"]
+    },
+    {
+      "domain": "acme-corp-inc.xyz",
+      "reputation_score": 0.94,
+      "known_malware_families": [],
+      "first_seen": "2026-02-05",
+      "last_seen": "2026-03-28",
+      "tags": ["bec", "ceo-fraud", "wire-transfer-scam"]
+    },
+    {
+      "domain": "github.com",
+      "reputation_score": 0.01,
+      "known_malware_families": [],
+      "first_seen": "2008-04-10",
+      "last_seen": "2026-03-28",
+      "tags": ["legitimate", "developer-platform", "trusted"]
+    },
+    {
+      "domain": "corp-voicemail-system.com",
+      "reputation_score": 0.88,
+      "known_malware_families": [],
+      "first_seen": "2025-09-22",
+      "last_seen": "2026-03-27",
+      "tags": ["vishing", "credential-harvesting", "corporate-lure"]
+    },
+    {
+      "domain": "voicemail-playback.net",
+      "reputation_score": 0.92,
+      "known_malware_families": ["QakBot"],
+      "first_seen": "2026-01-08",
+      "last_seen": "2026-03-26",
+      "tags": ["phishing", "vishing-lure", "malware-dropper"]
+    },
+    {
+      "domain": "linkedin.com",
+      "reputation_score": 0.01,
+      "known_malware_families": [],
+      "first_seen": "2002-12-28",
+      "last_seen": "2026-03-28",
+      "tags": ["legitimate", "social-network", "trusted"]
+    },
+    {
+      "domain": "invoice-portal-docs.com",
+      "reputation_score": 0.95,
+      "known_malware_families": [],
+      "first_seen": "2026-03-01",
+      "last_seen": "2026-03-28",
+      "tags": ["phishing", "invoice-fraud", "payment-scam", "newly-registered"]
+    },
+    {
+      "domain": "notion.so",
+      "reputation_score": 0.02,
+      "known_malware_families": [],
+      "first_seen": "2016-08-15",
+      "last_seen": "2026-03-28",
+      "tags": ["legitimate", "productivity", "trusted"]
+    },
+    {
+      "domain": "docusign.net",
+      "reputation_score": 0.02,
+      "known_malware_families": [],
+      "first_seen": "2003-01-01",
+      "last_seen": "2026-03-28",
+      "tags": ["legitimate", "esignature", "trusted"]
+    },
+    {
+      "domain": "corp-helpdesk-secure.org",
+      "reputation_score": 0.96,
+      "known_malware_families": ["AsyncRAT", "NjRAT"],
+      "first_seen": "2026-02-14",
+      "last_seen": "2026-03-27",
+      "tags": ["phishing", "malware-delivery", "it-lure", "rat-dropper"]
+    },
+    {
+      "domain": "accounts.google.com",
+      "reputation_score": 0.01,
+      "known_malware_families": [],
+      "first_seen": "1997-09-15",
+      "last_seen": "2026-03-28",
+      "tags": ["legitimate", "google", "trusted"]
+    },
+    {
+      "domain": "zoom01-recordings.net",
+      "reputation_score": 0.93,
+      "known_malware_families": [],
+      "first_seen": "2025-10-30",
+      "last_seen": "2026-03-26",
+      "tags": ["phishing", "zoom-lookalike", "credential-harvesting"]
+    },
+    {
+      "domain": "stripe.com",
+      "reputation_score": 0.01,
+      "known_malware_families": [],
+      "first_seen": "2011-09-01",
+      "last_seen": "2026-03-28",
+      "tags": ["legitimate", "fintech", "trusted"]
+    },
+    {
+      "domain": "onedrive-support-center.com",
+      "reputation_score": 0.92,
+      "known_malware_families": [],
+      "first_seen": "2025-12-01",
+      "last_seen": "2026-03-25",
+      "tags": ["phishing", "microsoft-lookalike", "credential-harvesting"]
+    },
+    {
+      "domain": "cybersec-news-weekly.net",
+      "reputation_score": 0.22,
+      "known_malware_families": [],
+      "first_seen": "2024-06-10",
+      "last_seen": "2026-03-20",
+      "tags": ["newsletter", "unverified", "potentially-unwanted"]
+    },
+    {
+      "domain": "norton-renewal-alerts.com",
+      "reputation_score": 0.89,
+      "known_malware_families": [],
+      "first_seen": "2025-07-18",
+      "last_seen": "2026-03-25",
+      "tags": ["phishing", "tech-support-scam", "antivirus-lure"]
+    },
+    {
+      "domain": "security-noreply@google.com",
+      "reputation_score": 0.01,
+      "known_malware_families": [],
+      "first_seen": "1997-09-15",
+      "last_seen": "2026-03-28",
+      "tags": ["legitimate", "google", "trusted"]
+    },
+    {
+      "domain": "google.com",
+      "reputation_score": 0.01,
+      "known_malware_families": [],
+      "first_seen": "1997-09-15",
+      "last_seen": "2026-03-28",
+      "tags": ["legitimate", "search-engine", "trusted"]
+    },
+    {
+      "domain": "dropbox-file-sharing.io",
+      "reputation_score": 0.97,
+      "known_malware_families": ["IcedID"],
+      "first_seen": "2026-01-25",
+      "last_seen": "2026-03-28",
+      "tags": ["phishing", "dropbox-lookalike", "malware-delivery", "newly-registered"]
+    },
+    {
+      "domain": "sans.org",
+      "reputation_score": 0.01,
+      "known_malware_families": [],
+      "first_seen": "1999-02-07",
+      "last_seen": "2026-03-28",
+      "tags": ["legitimate", "cybersecurity-training", "trusted"]
+    },
+    {
+      "domain": "fedex-delivery-notice.com",
+      "reputation_score": 0.91,
+      "known_malware_families": [],
+      "first_seen": "2025-11-20",
+      "last_seen": "2026-03-27",
+      "tags": ["phishing", "delivery-scam", "payment-fraud", "fedex-lookalike"]
+    },
+    {
+      "domain": "slack.com",
+      "reputation_score": 0.01,
+      "known_malware_families": [],
+      "first_seen": "2013-08-01",
+      "last_seen": "2026-03-28",
+      "tags": ["legitimate", "messaging", "trusted"]
+    },
+    {
+      "domain": "techsurvey-rewards.click",
+      "reputation_score": 0.98,
+      "known_malware_families": [],
+      "first_seen": "2026-03-10",
+      "last_seen": "2026-03-28",
+      "tags": ["phishing", "prize-scam", "payment-fraud", "suspicious-tld", "newly-registered"]
+    },
+    {
+      "domain": "atlassian.com",
+      "reputation_score": 0.01,
+      "known_malware_families": [],
+      "first_seen": "2002-01-01",
+      "last_seen": "2026-03-28",
+      "tags": ["legitimate", "developer-tools", "trusted"]
+    },
+    {
+      "domain": "secure-hdfc-bank-update.com",
+      "reputation_score": 0.99,
+      "known_malware_families": [],
+      "first_seen": "2026-03-15",
+      "last_seen": "2026-03-28",
+      "tags": ["phishing", "bank-impersonation", "kyc-fraud", "india-targeted", "newly-registered"]
+    },
+    {
+      "domain": "calendly.com",
+      "reputation_score": 0.01,
+      "known_malware_families": [],
+      "first_seen": "2013-01-01",
+      "last_seen": "2026-03-28",
+      "tags": ["legitimate", "scheduling", "trusted"]
+    },
+    {
+      "domain": "company-hrms-update.net",
+      "reputation_score": 0.38,
+      "known_malware_families": [],
+      "first_seen": "2025-06-01",
+      "last_seen": "2026-03-28",
+      "tags": ["unverified", "hr-portal", "possibly-internal", "suspicious"]
+    },
+    {
+      "domain": "figma.com",
+      "reputation_score": 0.01,
+      "known_malware_families": [],
+      "first_seen": "2012-01-01",
+      "last_seen": "2026-03-28",
+      "tags": ["legitimate", "design-tool", "trusted"]
+    },
+    {
+      "domain": "amazon-awsalert.com",
+      "reputation_score": 0.96,
+      "known_malware_families": [],
+      "first_seen": "2026-02-28",
+      "last_seen": "2026-03-27",
+      "tags": ["phishing", "aws-lookalike", "credential-harvesting", "cloud-lure"]
+    }
+  ],
+  "sandbox_results": [
+    {
+      "url": "http://paypa1-secure-verify.ru/login",
+      "redirects_to": ["http://paypa1-secure-verify.ru/phish/pp_login.html"],
+      "page_title": "PayPal — Log In to Your Account",
+      "credential_harvesting_detected": true,
+      "malware_download_detected": false,
+      "risk_level": "critical"
+    },
+    {
+      "url": "https://microsoft-365-mfa.net/enroll",
+      "redirects_to": ["https://microsoft-365-mfa.net/o365/signin.html"],
+      "page_title": "Sign in to your account",
+      "credential_harvesting_detected": true,
+      "malware_download_detected": false,
+      "risk_level": "critical"
+    },
+    {
+      "url": "https://corp-helpdesk-secure.org/updates/cert_update_v2.exe",
+      "redirects_to": [],
+      "page_title": "",
+      "credential_harvesting_detected": false,
+      "malware_download_detected": true,
+      "risk_level": "critical"
+    },
+    {
+      "url": "https://zoom01-recordings.net/watch",
+      "redirects_to": ["https://zoom01-recordings.net/office365/signin.html"],
+      "page_title": "Sign in — Microsoft",
+      "credential_harvesting_detected": true,
+      "malware_download_detected": false,
+      "risk_level": "high"
+    },
+    {
+      "url": "https://dropbox-file-sharing.io/shared/a1b2c3d4/Q4_Salary",
+      "redirects_to": ["https://dropbox-file-sharing.io/icedid_dropper.js"],
+      "page_title": "Dropbox — Loading...",
+      "credential_harvesting_detected": true,
+      "malware_download_detected": true,
+      "risk_level": "critical"
+    },
+    {
+      "url": "https://fedex-delivery-notice.com/reschedule",
+      "redirects_to": ["https://fedex-delivery-notice.com/payment.html"],
+      "page_title": "FedEx — Schedule Redelivery",
+      "credential_harvesting_detected": true,
+      "malware_download_detected": false,
+      "risk_level": "high"
+    },
+    {
+      "url": "https://techsurvey-rewards.click/claim",
+      "redirects_to": ["https://techsurvey-rewards.click/cc-harvest.html"],
+      "page_title": "Congratulations! Claim Your Prize",
+      "credential_harvesting_detected": true,
+      "malware_download_detected": false,
+      "risk_level": "critical"
+    },
+    {
+      "url": "https://secure-hdfc-bank-update.com/verify",
+      "redirects_to": ["https://secure-hdfc-bank-update.com/kyc_form.html"],
+      "page_title": "HDFC Bank — KYC Verification",
+      "credential_harvesting_detected": true,
+      "malware_download_detected": false,
+      "risk_level": "critical"
+    },
+    {
+      "url": "https://amazon-awsalert.com/security/review",
+      "redirects_to": ["https://amazon-awsalert.com/aws_console_fake.html"],
+      "page_title": "AWS Management Console — Sign In",
+      "credential_harvesting_detected": true,
+      "malware_download_detected": false,
+      "risk_level": "critical"
+    },
+    {
+      "url": "https://norton-renewal-alerts.com/renew",
+      "redirects_to": [],
+      "page_title": "Norton 360 — Renew Your Subscription",
+      "credential_harvesting_detected": true,
+      "malware_download_detected": false,
+      "risk_level": "high"
+    },
+    {
+      "url": "https://onedrive-support-center.com/upgrade",
+      "redirects_to": ["https://onedrive-support-center.com/mslogin.html"],
+      "page_title": "Sign in to OneDrive",
+      "credential_harvesting_detected": true,
+      "malware_download_detected": false,
+      "risk_level": "high"
+    },
+    {
+      "url": "https://invoice-portal-docs.com/pay",
+      "redirects_to": ["https://invoice-portal-docs.com/payment_form.html"],
+      "page_title": "Secure Payment Portal",
+      "credential_harvesting_detected": true,
+      "malware_download_detected": false,
+      "risk_level": "high"
+    },
+    {
+      "url": "https://voicemail-playback.net/vm",
+      "redirects_to": ["https://voicemail-playback.net/o365.html"],
+      "page_title": "Microsoft — Sign in to your account",
+      "credential_harvesting_detected": true,
+      "malware_download_detected": false,
+      "risk_level": "critical"
+    },
+    {
+      "url": "https://company-hrms-update.net/update",
+      "redirects_to": [],
+      "page_title": "Employee HR Portal — Update Details",
+      "credential_harvesting_detected": false,
+      "malware_download_detected": false,
+      "risk_level": "medium"
+    },
+    {
+      "url": "https://cybersec-news-weekly.net/confirm",
+      "redirects_to": [],
+      "page_title": "Cybersecurity Weekly — Confirm Subscription",
+      "credential_harvesting_detected": false,
+      "malware_download_detected": false,
+      "risk_level": "low"
+    }
+  ],
+  "whois_records": [
+    {
+      "domain": "paypa1-alerts.com",
+      "registrar": "NameCheap, Inc.",
+      "creation_date": "2025-11-01",
+      "expiry_date": "2026-11-01",
+      "registrant_country": "RU",
+      "privacy_protected": true,
+      "age_days": 148
+    },
+    {
+      "domain": "microsoft-365-mfa.net",
+      "registrar": "GoDaddy LLC",
+      "creation_date": "2026-01-08",
+      "expiry_date": "2027-01-08",
+      "registrant_country": "NL",
+      "privacy_protected": true,
+      "age_days": 79
+    },
+    {
+      "domain": "amazon.com",
+      "registrar": "MarkMonitor Inc.",
+      "creation_date": "1994-11-01",
+      "expiry_date": "2027-11-01",
+      "registrant_country": "US",
+      "privacy_protected": false,
+      "age_days": 11470
+    },
+    {
+      "domain": "acme-corp-inc.xyz",
+      "registrar": "Porkbun LLC",
+      "creation_date": "2026-02-01",
+      "expiry_date": "2027-02-01",
+      "registrant_country": "NG",
+      "privacy_protected": true,
+      "age_days": 55
+    },
+    {
+      "domain": "github.com",
+      "registrar": "MarkMonitor Inc.",
+      "creation_date": "2007-10-09",
+      "expiry_date": "2027-10-09",
+      "registrant_country": "US",
+      "privacy_protected": false,
+      "age_days": 6745
+    },
+    {
+      "domain": "corp-voicemail-system.com",
+      "registrar": "Tucows Inc.",
+      "creation_date": "2025-09-20",
+      "expiry_date": "2026-09-20",
+      "registrant_country": "UA",
+      "privacy_protected": true,
+      "age_days": 190
+    },
+    {
+      "domain": "invoice-portal-docs.com",
+      "registrar": "NameCheap, Inc.",
+      "creation_date": "2026-02-28",
+      "expiry_date": "2027-02-28",
+      "registrant_country": "RU",
+      "privacy_protected": true,
+      "age_days": 28
+    },
+    {
+      "domain": "corp-helpdesk-secure.org",
+      "registrar": "GoDaddy LLC",
+      "creation_date": "2026-02-12",
+      "expiry_date": "2027-02-12",
+      "registrant_country": "DE",
+      "privacy_protected": true,
+      "age_days": 44
+    },
+    {
+      "domain": "zoom01-recordings.net",
+      "registrar": "Porkbun LLC",
+      "creation_date": "2025-10-27",
+      "expiry_date": "2026-10-27",
+      "registrant_country": "CN",
+      "privacy_protected": true,
+      "age_days": 153
+    },
+    {
+      "domain": "onedrive-support-center.com",
+      "registrar": "NameCheap, Inc.",
+      "creation_date": "2025-11-28",
+      "expiry_date": "2026-11-28",
+      "registrant_country": "NL",
+      "privacy_protected": true,
+      "age_days": 121
+    },
+    {
+      "domain": "cybersec-news-weekly.net",
+      "registrar": "Namecheap Inc.",
+      "creation_date": "2024-06-05",
+      "expiry_date": "2026-06-05",
+      "registrant_country": "US",
+      "privacy_protected": false,
+      "age_days": 662
+    },
+    {
+      "domain": "norton-renewal-alerts.com",
+      "registrar": "GoDaddy LLC",
+      "creation_date": "2025-07-14",
+      "expiry_date": "2026-07-14",
+      "registrant_country": "BR",
+      "privacy_protected": true,
+      "age_days": 258
+    },
+    {
+      "domain": "dropbox-file-sharing.io",
+      "registrar": "Porkbun LLC",
+      "creation_date": "2026-01-22",
+      "expiry_date": "2027-01-22",
+      "registrant_country": "RU",
+      "privacy_protected": true,
+      "age_days": 65
+    },
+    {
+      "domain": "fedex-delivery-notice.com",
+      "registrar": "Namecheap Inc.",
+      "creation_date": "2025-11-17",
+      "expiry_date": "2026-11-17",
+      "registrant_country": "DE",
+      "privacy_protected": true,
+      "age_days": 132
+    },
+    {
+      "domain": "techsurvey-rewards.click",
+      "registrar": "Porkbun LLC",
+      "creation_date": "2026-03-08",
+      "expiry_date": "2027-03-08",
+      "registrant_country": "SG",
+      "privacy_protected": true,
+      "age_days": 20
+    },
+    {
+      "domain": "secure-hdfc-bank-update.com",
+      "registrar": "GoDaddy LLC",
+      "creation_date": "2026-03-13",
+      "expiry_date": "2027-03-13",
+      "registrant_country": "IN",
+      "privacy_protected": true,
+      "age_days": 15
+    },
+    {
+      "domain": "company-hrms-update.net",
+      "registrar": "Namecheap Inc.",
+      "creation_date": "2025-05-28",
+      "expiry_date": "2026-05-28",
+      "registrant_country": "IN",
+      "privacy_protected": false,
+      "age_days": 305
+    },
+    {
+      "domain": "amazon-awsalert.com",
+      "registrar": "Porkbun LLC",
+      "creation_date": "2026-02-25",
+      "expiry_date": "2027-02-25",
+      "registrant_country": "RO",
+      "privacy_protected": true,
+      "age_days": 31
+    },
+    {
+      "domain": "stripe.com",
+      "registrar": "MarkMonitor Inc.",
+      "creation_date": "2010-05-11",
+      "expiry_date": "2027-05-11",
+      "registrant_country": "US",
+      "privacy_protected": false,
+      "age_days": 5770
+    },
+    {
+      "domain": "slack.com",
+      "registrar": "MarkMonitor Inc.",
+      "creation_date": "2009-05-01",
+      "expiry_date": "2027-05-01",
+      "registrant_country": "US",
+      "privacy_protected": false,
+      "age_days": 6180
+    }
+  ]
+}

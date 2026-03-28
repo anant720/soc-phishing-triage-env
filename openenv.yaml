@@ -1,0 +1,19 @@
+name: soc-phishing-triage
+version: "1.0.0"
+description: Autonomous Tier-1 SOC phishing investigation environment.
+
+hf_space: openenv/soc-triage-env
+
+server:
+  port: 8000
+  host: "0.0.0.0"
+  dockerfile: server/Dockerfile
+
+environment:
+  max_steps_per_episode: 10
+  reward:
+    correct_verdict: 1.0
+    incorrect_verdict: -1.0
+    escalate_ambiguous: 0.5
+    tool_use_bonus: 0.05
+    timeout_penalty: -0.5
