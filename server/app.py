@@ -1,3 +1,4 @@
+import os
 from fastapi import FastAPI, HTTPException
 from typing import Any, Optional
 
@@ -104,7 +105,9 @@ def grader():
 
 def main():
     import uvicorn
-    uvicorn.run("server.app:app", host="0.0.0.0", port=8000)
+    # HF Spaces requires port 7860; override with PORT env var if needed locally
+    port = int(os.environ.get("PORT", 7860))
+    uvicorn.run("server.app:app", host="0.0.0.0", port=port)
 
 if __name__ == "__main__":
     main()
