@@ -1,5 +1,5 @@
 # Server-side pinned dependencies for Docker builds
-# Generated from pyproject.toml — do not edit manually.
+# openai + requests needed by inference.py per hackathon spec
 
 fastapi>=0.104.0
 uvicorn>=0.24.0
@@ -8,3 +8,5 @@ httpx>=0.28.1
 websockets>=15.0.1
 python-dotenv>=1.0.0
 openenv-core>=0.2.0
+openai>=1.0.0
+requests>=2.25.0
