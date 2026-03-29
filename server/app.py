@@ -1,12 +1,23 @@
 import os
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import RedirectResponse
 from typing import Any, Optional
 
 from models import TriageAction, TriageObservation, TriageState, DifficultyTier
 from server.environment import SocTriageEnvironment
 from server.grader import grade, GraderResult
 
-app = FastAPI(title="SOC Phishing Triage Environment API")
+app = FastAPI(
+    title="SOC Phishing Triage Environment API",
+    description="Autonomous SOC Phishing Triage — OpenEnv-compliant RL environment for Meta hackathon.",
+    version="0.1.0",
+)
+
+
+@app.get("/", include_in_schema=False)
+def root():
+    # redirect the bare URL to the interactive API docs
+    return RedirectResponse(url="/docs")
 
 # One environment at a time — we're not running parallel episodes here
 _ENV = None
