@@ -1,87 +1,90 @@
 """
-This is the grader — it looks at a finished episode and spits out a score between 0.0 and 1.0.
+SOC Log Triage Grader — v4.0
 
-The whole point is to reward agents that actually *investigate* before guessing,
-not just ones that happened to get lucky. Here's the logic:
+Score is always CLAMPED to [0.0, 1.0] at the end.
+A PERFECT run earns exactly 1.00.
 
-1. If the verdict is wrong (or never submitted), score is 0.0. Full stop.
-
-2. Start at 1.0 if the verdict was correct.
-
-3. Two kinds of deductions can bring that down:
-
-   a) Investigation shortcut penalty
-      If you got the right answer on Medium/Hard but never called the tools
-      that would've let you *know* it was right, that's suspicious. You probably
-      just guessed. We knock off 0.5 for that.
-
-      What each tier actually requires you to check:
-        Easy   → sandbox_url or lookup_threat_intel (there's an obvious URL, use it)
-        Medium → analyze_headers (the whole trick is in the headers)
-        Hard   → analyze_headers + sandbox_url or lookup_threat_intel (need both angles)
-
-   b) Too many steps penalty
-      A good analyst doesn't spend 10 steps on a 2-step problem. We deduct
-      if you burn through more steps than needed:
-
-        tier   optimal   first warning   hard cap
-        Easy      2           6              9
-        Medium    2           6              9
-        Hard      4           8             12
-
-4. Score can never go below 0.0.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+MALICIOUS episode — perfect = 1.00
+  +0.30  correct verdict
+  +0.25  investigation tools  (proportional; 0 coverage → penalty)
+  +0.20  attack type correct
+  +0.15  backup on correct host
+  +0.10  step efficiency
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+BENIGN episode — perfect = 1.00
+  +0.30  correct verdict
+  +0.35  tools  (proportional; 0 coverage → penalty)
+  +0.25  did NOT trigger backup
+  +0.10  step efficiency
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PENALTIES (applied AFTER components, can push score lower; clamped at 0):
+  −0.25  wrong verdict
+  −0.20  zero investigation (no required tool group checked at all)
+  −0.10  rush verdict (steps < ideal AND coverage < 50%)
+  −0.10  backup on benign (false positive)
+  −0.08  backup on wrong host (malicious)
+  −0.05  excess steps beyond hard bracket
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Score is clamped to [0.0, 1.0]. All breakdown values are PRE-CLAMP.
 """
-
 from __future__ import annotations
 
-from models import DifficultyTier, Verdict, TriageState
+from models import AttackType, DifficultyTier, LogTriageState, LogVerdict
 
 # ---------------------------------------------------------------------------
-# What tools each tier actually requires you to have used
+# Component weights — each path sums to exactly 1.00 for perfect behavior
 # ---------------------------------------------------------------------------
+W_VERDICT          = 0.30
+W_TOOLS_MALICIOUS  = 0.25
+W_TOOLS_BENIGN     = 0.35
+W_ATTACK_TYPE      = 0.20
+W_BACKUP_MALICIOUS = 0.15
+W_NO_BAD_BACKUP    = 0.25
+W_EFFICIENCY       = 0.10
 
-# If you skipped these, you were probably guessing. Don't guess.
-REQUIRED_TOOLS: dict[str, frozenset[str]] = {
-    "Easy": frozenset({"sandbox_url", "lookup_threat_intel"}),
-    "Medium": frozenset({"analyze_headers"}),
-    "Hard": frozenset({"analyze_headers"}),      # plus a URL tool — see check below
+# Active penalties (always negative, applied after components)
+PENALTY_WRONG_VERDICT      = -0.25   # wrong verdict (on top of 0 verdict bonus)
+PENALTY_NO_INVESTIGATION   = -0.20   # zero required tool groups covered
+PENALTY_RUSH               = -0.10   # steps < ideal AND tool coverage < 50%
+PENALTY_FALSE_BACKUP       = -0.10   # backup triggered on benign incident
+PENALTY_BACKUP_WRONG_HOST  = -0.08   # backup on wrong host (malicious)
+
+# Alias kept for test compatibility
+PENALTY_INVESTIGATION = W_TOOLS_MALICIOUS  # max bonus lost on no tools
+
+# ---------------------------------------------------------------------------
+# Required tool groups per tier
+# ---------------------------------------------------------------------------
+REQUIRED_TOOLS: dict[str, list[frozenset[str]]] = {
+    "Easy": [
+        frozenset({"query_logs", "analyze_process", "get_host_summary"}),
+    ],
+    "Medium": [
+        frozenset({"analyze_process", "get_host_summary"}),
+        frozenset({"check_ip_reputation", "check_file_hash", "query_logs"}),
+    ],
+    "Hard": [
+        frozenset({"analyze_process", "get_host_summary"}),
+        frozenset({"check_ip_reputation", "check_file_hash"}),
+        frozenset({"query_logs"}),
+    ],
 }
 
-# Hard tier also needs at least one URL-side tool on top of headers
-_HARD_URL_TOOLS: frozenset[str] = frozenset({"sandbox_url", "lookup_threat_intel"})
-
-# Step count brackets per tier: (ideal, first_warning, second_warning)
-# Going over the first threshold docks -0.1, going over both docks -0.2 total
+# Step budgets: (ideal_max, mild_warn, hard_warn)
 STEP_BRACKETS: dict[str, tuple[int, int, int]] = {
-    "Easy":   (2, 5, 8),
-    "Medium": (2, 5, 8),
-    "Hard":   (4, 7, 11),
+    "Easy":   (6,  12, 17),   # max_steps=20
+    "Medium": (9,  18, 25),   # max_steps=28
+    "Hard":   (14, 28, 37),   # max_steps=40
 }
 
-# How much we dock for each type of infraction
-PENALTY_NO_INVESTIGATION  = -0.5
-PENALTY_EXCESS_STEPS_MILD = -0.1
-PENALTY_EXCESS_STEPS_HARD = -0.1   # stacks on top if you hit both thresholds
-
 
 # ---------------------------------------------------------------------------
-# Public API
+# Result object
 # ---------------------------------------------------------------------------
-
 class GraderResult:
-    """
-    Everything the grader knows about a finished episode, packaged up nicely.
-    score is the final number. deductions tells you what hurt it. breakdown
-    gives the raw math. correct is just a quick yes/no at the top.
-    """
-
-    def __init__(
-        self,
-        score: float,
-        correct: bool,
-        deductions: list[str],
-        breakdown: dict[str, float],
-    ) -> None:
+    def __init__(self, score: float, correct: bool,
+                 deductions: list[str], breakdown: dict) -> None:
         self.score      = score
         self.correct    = correct
         self.deductions = deductions
@@ -96,117 +99,174 @@ class GraderResult:
         }
 
 
-def grade(state: TriageState) -> GraderResult:
+# ---------------------------------------------------------------------------
+# Main grader
+# ---------------------------------------------------------------------------
+def grade(state: LogTriageState) -> GraderResult:
     """
-    Takes the episode state after it ends and returns a score.
-    This is called by GET /grader. The state object has everything
-    we need: what verdict was submitted, what tools were used, how many steps.
+    Grade a completed episode.
+    Score = sum of components + penalties, clamped to [0.0, 1.0].
+    All pre-clamp values are preserved in breakdown for display.
     """
     deductions: list[str] = []
-    breakdown: dict[str, float] = {}
+    breakdown:  dict      = {}
+    score = 0.0
 
-    # ── 1. Correctness gate ──────────────────────────────────────────────────
+    # ── 0. Must have verdict ─────────────────────────────────────────────────
     if not state.verdict_submitted or state.final_verdict is None:
         return GraderResult(
-            score=0.0,
-            correct=False,
+            score=0.0, correct=False,
             deductions=["No verdict submitted — episode incomplete."],
-            breakdown={"base": 0.0},
+            breakdown={"final_score": 0.0},
         )
 
-    # did the model actually get it right?
-    agent_phishing  = (state.final_verdict.value == "phishing")
-    correct         = (agent_phishing == state.expected_verdict)
+    tier         = state.difficulty_tier.value if state.difficulty_tier else "Hard"
+    tools_used   = frozenset(state.tools_used or [])
+    backed_up    = set(state.backup_triggered_hosts or [])
+    affected     = set(state.affected_hosts or [])
+    steps        = state.step_count
 
-    if not correct:
-        return GraderResult(
-            score=0.0,
-            correct=False,
-            deductions=[
-                f"Wrong verdict (predicted={'phishing' if agent_phishing else 'benign'}, "
-                f"expected={'phishing' if state.expected_verdict else 'benign'})."
-            ],
-            breakdown={"base": 0.0},
-        )
+    # ── 1. Investigation tools (computed early — needed for rush penalty) ────
+    required_groups = REQUIRED_TOOLS.get(tier, [])
+    n_groups        = len(required_groups) or 1
+    groups_covered  = sum(1 for g in required_groups if tools_used & g)
+    coverage_ratio  = groups_covered / n_groups
 
-    # ── 2. Base score ────────────────────────────────────────────────────────
-    score = 1.0
-    breakdown["base"] = 1.0
-
-    # Determine tier name (fallback to Hard for unknown)
-    tier = state.difficulty_tier.value if state.difficulty_tier else "Hard"
-    tools_used: frozenset[str] = frozenset(state.tools_used or [])
-
-    # ── 3a. Investigation penalty ────────────────────────────────────────────
-    investigation_penalty = _check_investigation(tier, tools_used)
-    if investigation_penalty < 0.0:
-        label = f"Investigation short-cut on {tier} tier (no required tools called)."
-        deductions.append(label)
-        breakdown["investigation_penalty"] = investigation_penalty
-        score += investigation_penalty
-
-    # ── 3b. Efficiency / step-count penalty ──────────────────────────────────
-    step_penalty = _check_steps(tier, state.step_count)
-    if step_penalty < 0.0:
+    # ── 2. Verdict ───────────────────────────────────────────────────────────
+    correct = (state.final_verdict == state.expected_verdict)
+    if correct:
+        score += W_VERDICT
+        breakdown["verdict"] = W_VERDICT
+    else:
+        # No verdict bonus + active penalty for wrong verdict
+        breakdown["verdict"] = 0.0
+        score += PENALTY_WRONG_VERDICT
+        breakdown["wrong_verdict_penalty"] = PENALTY_WRONG_VERDICT
+        sub = state.final_verdict.value if state.final_verdict else "?"
+        exp = state.expected_verdict.value
         deductions.append(
-            f"Excessive steps: {state.step_count} steps on a {tier} task "
-            f"(optimal ≤ {STEP_BRACKETS.get(tier, (4, 7, 11))[0]})."
+            f"Wrong verdict: submitted '{sub}', expected '{exp}'. "
+            f"({PENALTY_WRONG_VERDICT:+.2f} penalty)"
         )
-        breakdown["step_penalty"] = step_penalty
-        score += step_penalty
 
-    # ── 4. Floor ─────────────────────────────────────────────────────────────
-    score = max(0.0, round(score, 4))
+    is_malicious = (state.expected_verdict == LogVerdict.MALICIOUS)
+
+    # ── 3. Proportional tool score + no-investigation penalty ────────────────
+    tool_weight = W_TOOLS_MALICIOUS if is_malicious else W_TOOLS_BENIGN
+    tool_score  = round(coverage_ratio * tool_weight, 4)
+    score      += tool_score
+    breakdown["tools"] = tool_score
+
+    if coverage_ratio == 0.0:
+        # Zero investigation — active penalty on top of zero tool score
+        score += PENALTY_NO_INVESTIGATION
+        breakdown["no_investigation_penalty"] = PENALTY_NO_INVESTIGATION
+        deductions.append(
+            f"No investigation tools used — zero required tool groups covered. "
+            f"({PENALTY_NO_INVESTIGATION:+.2f} penalty)"
+        )
+    elif coverage_ratio < 1.0:
+        missing = [sorted(g) for g in required_groups if not (tools_used & g)]
+        deductions.append(
+            f"Tools: covered {groups_covered}/{n_groups} required groups. "
+            f"Missing: {missing}. Earned {tool_score:.2f}/{tool_weight:.2f}."
+        )
+
+    # ── 4. Attack type (malicious only) ─────────────────────────────────────
+    if is_malicious:
+        attack_ok = (
+            state.final_attack_type is not None
+            and state.final_attack_type == state.expected_attack_type
+        )
+        if attack_ok:
+            score += W_ATTACK_TYPE
+            breakdown["attack_type"] = W_ATTACK_TYPE
+        else:
+            sub_atk = (state.final_attack_type.value
+                       if state.final_attack_type else "not provided")
+            breakdown["attack_type"] = 0.0
+            deductions.append(
+                f"Wrong/missing attack type: submitted '{sub_atk}', "
+                f"expected '{state.expected_attack_type.value}'. "
+                f"(+{W_ATTACK_TYPE:.2f} not earned)"
+            )
+
+    # ── 5. Backup handling ───────────────────────────────────────────────────
+    if is_malicious:
+        correct_backups = backed_up & affected
+        if correct_backups:
+            score += W_BACKUP_MALICIOUS
+            breakdown["backup"] = W_BACKUP_MALICIOUS
+        else:
+            breakdown["backup"] = 0.0
+            if backed_up:
+                score += PENALTY_BACKUP_WRONG_HOST
+                breakdown["backup_wrong_host_penalty"] = PENALTY_BACKUP_WRONG_HOST
+                deductions.append(
+                    f"Backup on wrong host(s) {sorted(backed_up)}, "
+                    f"expected one of {sorted(affected)}. "
+                    f"({PENALTY_BACKUP_WRONG_HOST:+.2f})"
+                )
+            else:
+                deductions.append(
+                    f"No backup on affected host(s) {sorted(affected)}. "
+                    f"(+{W_BACKUP_MALICIOUS:.2f} not earned)"
+                )
+    else:
+        if not backed_up:
+            score += W_NO_BAD_BACKUP
+            breakdown["backup"] = W_NO_BAD_BACKUP
+        else:
+            breakdown["backup"] = 0.0
+            score += PENALTY_FALSE_BACKUP
+            breakdown["false_backup_penalty"] = PENALTY_FALSE_BACKUP
+            deductions.append(
+                f"Backup triggered on benign incident — false positive! "
+                f"({PENALTY_FALSE_BACKUP:+.2f})"
+            )
+
+    # ── 6. Step efficiency ───────────────────────────────────────────────────
+    ideal, warn_mild, warn_hard = STEP_BRACKETS.get(tier, (9, 18, 25))
+
+    # Rush penalty: submitted verdict too quickly without enough investigation
+    if steps < ideal and coverage_ratio < 0.5:
+        score += PENALTY_RUSH
+        breakdown["rush_penalty"] = PENALTY_RUSH
+        deductions.append(
+            f"Rush penalty: submitted in {steps} steps (ideal ≥ {ideal} for thorough "
+            f"investigation) with only {groups_covered}/{n_groups} tool groups covered. "
+            f"({PENALTY_RUSH:+.2f})"
+        )
+
+    if steps <= ideal:
+        eff_score = W_EFFICIENCY
+    elif steps <= warn_mild:
+        eff_score = round(W_EFFICIENCY * 0.5, 4)
+    elif steps <= warn_hard:
+        eff_score = 0.0
+    else:
+        eff_score = -0.05      # excess steps
+        deductions.append(
+            f"Excess steps: {steps} steps on {tier} tier "
+            f"(hard limit = {warn_hard}). ({eff_score:+.2f})"
+        )
+
+    score += eff_score
+    breakdown["efficiency"] = eff_score
+    if 0.0 < eff_score < W_EFFICIENCY:
+        deductions.append(
+            f"Step efficiency: {steps} steps on {tier} "
+            f"(ideal ≤ {ideal}). Earned {eff_score:.2f}/{W_EFFICIENCY:.2f}."
+        )
+
+    # ── 7. Clamp and store ───────────────────────────────────────────────────
+    breakdown["raw_score"] = round(score, 4)   # pre-clamp, can be negative
+    score = max(0.0, min(1.0, round(score, 4)))
+    breakdown["final_score"] = score
 
     return GraderResult(
         score=score,
-        correct=True,
+        correct=correct,
         deductions=deductions,
         breakdown=breakdown,
     )
-
-
-# ---------------------------------------------------------------------------
-# Helper functions — keep grade() readable
-# ---------------------------------------------------------------------------
-
-def _check_investigation(tier: str, tools_used: frozenset[str]) -> float:
-    """
-    Returns how much to dock for skipping investigation tools.
-    Returns 0.0 if the agent did the right thing.
-    """
-    if tier == "Easy":
-        # on Easy the malicious URL is right there — just run sandbox or threat intel
-        if not (tools_used & REQUIRED_TOOLS["Easy"]):
-            return PENALTY_NO_INVESTIGATION
-        return 0.0
-
-    if tier == "Medium":
-        # the whole signal on Medium is broken auth headers — you have to check them
-        if "analyze_headers" not in tools_used:
-            return PENALTY_NO_INVESTIGATION
-        return 0.0
-
-    if tier == "Hard":
-        # Hard needs both: the header check AND a URL tool to cover both attack surfaces
-        has_headers   = "analyze_headers" in tools_used
-        has_url_tool  = bool(tools_used & _HARD_URL_TOOLS)
-        if not (has_headers and has_url_tool):
-            return PENALTY_NO_INVESTIGATION
-        return 0.0
-
-    return 0.0    # unknown tier — no penalty
-
-
-def _check_steps(tier: str, step_count: int) -> float:
-    """
-    Returns how much to dock for taking too long.
-    Two thresholds — hit the first and lose 0.1, hit both and lose 0.2.
-    """
-    _, warn_at, hard_at = STEP_BRACKETS.get(tier, (4, 7, 11))
-    penalty = 0.0
-    if step_count > hard_at:
-        penalty += PENALTY_EXCESS_STEPS_HARD   # hit the second threshold too
-    if step_count > warn_at:
-        penalty += PENALTY_EXCESS_STEPS_MILD   # always included if you hit either
-    return penalty

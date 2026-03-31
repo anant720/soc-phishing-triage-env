@@ -1,353 +1,372 @@
 """
-inference.py — OpenEnv hackathon submission entry point.
+Baseline ReAct Agent for the SOC Log Triage Environment (OpenEnv-compliant).
 
-Mandatory per hackathon spec:
-  - Uses the OpenAI API client for all LLM calls
-  - Reads credentials from environment variables:
-      API_BASE_URL  → LLM API endpoint  (default: https://api-inference.huggingface.co/v1)
-      MODEL_NAME    → model identifier  (default: Qwen/Qwen2.5-7B-Instruct)
-      HF_TOKEN      → Hugging Face API key used as the Bearer token
-  - Runs one episode per difficulty tier (Easy, Medium, Hard)
-  - Prints a score for each task and a final summary
+Reads API credentials from environment variables:
+  OPENAI_API_KEY   Primary API key (OpenAI / Groq / Together / any compatible)
+  API_BASE_URL     API endpoint override (default: OpenAI; Groq: https://api.groq.com/openai/v1)
+  MODEL_NAME       Model identifier (default: gpt-4o-mini)
+  HF_TOKEN         Alternative API key (fallback if OPENAI_API_KEY not set)
+  SOC_SERVER_URL   OpenEnv server URL (default: http://localhost:7860)
 
-Usage:
-    export API_BASE_URL="https://api-inference.huggingface.co/v1"
-    export MODEL_NAME="Qwen/Qwen2.5-7B-Instruct"
-    export HF_TOKEN="hf_..."
-    python inference.py
-
-    # to run against a local server instead:
-    python inference.py --env-url http://localhost:7860
-
-    # to run more episodes per tier:
-    python inference.py --episodes 3
+Produces reproducible baseline scores on all 3 tasks (Easy / Medium / Hard).
+Runtime: < 20 minutes on a 2-vCPU / 8 GB machine.
 """
-
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import os
 import sys
 import time
 from typing import Any
 
-import requests
-from openai import OpenAI
+from dotenv import load_dotenv
+
+load_dotenv()
+
+try:
+    from openai import AsyncOpenAI
+except ImportError:
+    print("[ERROR] openai package not installed. Run: pip install openai")
+    sys.exit(1)
+
+import httpx
 
 # ---------------------------------------------------------------------------
-# Environment & LLM config — all read from env vars per hackathon spec
+# Configuration — all from environment variables as required by hackathon spec
 # ---------------------------------------------------------------------------
+OPENAI_API_KEY = (
+    os.getenv("OPENAI_API_KEY")
+    or os.getenv("HF_TOKEN")
+    or os.getenv("GROQ_API_KEY")
+    or ""
+)
+API_BASE_URL = os.getenv("API_BASE_URL", "")       # blank = OpenAI default
+MODEL_NAME   = os.getenv("MODEL_NAME", "gpt-4o-mini")
 
-API_BASE_URL = os.environ.get("API_BASE_URL", "https://api-inference.huggingface.co/v1")
-MODEL_NAME   = os.environ.get("MODEL_NAME",   "Qwen/Qwen2.5-7B-Instruct")
-HF_TOKEN     = os.environ.get("HF_TOKEN",     "")
-ENV_URL      = os.environ.get("ENV_URL",      "http://localhost:7860")
+# Max steps per tier — must stay below hackathon 20-min runtime limit
+MAX_STEPS: dict[str, int] = {
+    "Easy":   18,   # ~50 logs
+    "Medium": 26,   # ~100 logs
+    "Hard":   36,   # ~200 logs
+}
 
-MAX_STEPS   = 8     # per-episode step budget (well within 20-min runtime limit)
-TEMPERATURE = 0.2   # low temperature → more deterministic, reproducible scores
-
-# ---------------------------------------------------------------------------
-# System prompt — tells the LLM exactly how to interact with the environment
-# ---------------------------------------------------------------------------
-
-SYSTEM_PROMPT = """You are an expert Tier-1 SOC (Security Operations Center) analyst.
-Your job is to triage a suspicious email and classify it as one of:
-  - "phishing"  : malicious email attempting fraud, credential theft, or malware delivery
-  - "benign"    : legitimate email from an authentic sender
-  - "escalate"  : ambiguous — needs Tier-2 analyst review
-
-You have these investigation tools available:
-
-1. analyze_headers(email_id)     → checks SPF, DKIM, DMARC and flags header anomalies
-2. lookup_threat_intel(domain)   → queries domain reputation: risk score and malware tags
-3. sandbox_url(url)              → detonates a URL in sandbox, checks credential harvesting
-4. whois_lookup(domain)          → returns domain age and registrar (new domains = red flag)
-
-Rules:
-- You MUST call at least one tool before submitting a verdict.
-- Think step-by-step. Gather evidence before deciding.
-- Respond ONLY with a single valid JSON object — no prose, no markdown fences.
-
-Tool call format:
-{"command": "<tool_name>", "params": {<key>: <value>}}
-
-Verdict format:
-{"command": "submit_verdict", "params": {"verdict": "<phishing|benign|escalate>"}}"""
+TEMPERATURE = 0.1
+MAX_TOKENS  = 512
 
 
-# ---------------------------------------------------------------------------
-# OpenAI client — pointed at whatever API_BASE_URL is set to
-# ---------------------------------------------------------------------------
-
-def make_client() -> OpenAI:
-    """
-    Builds the OpenAI client. If HF_TOKEN is set we use it as the API key
-    so this works against HF's Inference API out of the box. You can also
-    point API_BASE_URL at any OpenAI-compatible endpoint (OpenAI, Together,
-    Groq, local vLLM, etc.)
-    """
-    api_key = HF_TOKEN or "no-key-needed"  # some local endpoints don't require a key
-    return OpenAI(api_key=api_key, base_url=API_BASE_URL)
+def _extract_json(text: str) -> str:
+    """Extract JSON from model output that may be wrapped in markdown fences."""
+    text = text.strip()
+    import re
+    match = re.search(r"```(?:json)?\s*({.*?})\s*```", text, re.DOTALL)
+    if match:
+        return match.group(1)
+    brace_match = re.search(r"({.*})", text, re.DOTALL)
+    if brace_match:
+        return brace_match.group(1)
+    return text
 
 
-# ---------------------------------------------------------------------------
-# Environment HTTP helpers
-# ---------------------------------------------------------------------------
+SYSTEM_PROMPT = """You are an autonomous Tier-1 SOC analyst. You are investigating a
+SIEM incident bundle — a correlated set of Windows endpoint logs from one or more hosts.
 
-def env_reset(base_url: str, tier: str) -> dict:
-    r = requests.post(f"{base_url}/reset", params={"tier_filter": tier}, timeout=15)
-    r.raise_for_status()
-    return r.json()
+Your objective: investigate the logs, identify the threat, trigger a backup on any
+compromised host, and submit a final verdict.
+
+AVAILABLE TOOLS (output JSON only):
+1. query_logs(query)            - keyword search across all logs in this incident
+2. analyze_process(process_name)- get process tree for a named process
+3. check_ip_reputation(ip)      - threat-intel lookup for an IP address
+4. check_file_hash(hash)        - IOC lookup for a file hash
+5. get_host_summary(host)       - all events/processes/IPs seen on a host
+6. trigger_backup(host)         - snapshot a compromised host (REQUIRED for malicious verdict)
+7. submit_verdict(verdict, attack_type, affected_hosts) - end episode
+
+VERDICT VALUES: malicious | benign | escalate
+ATTACK TYPES (required when verdict=malicious):
+  c2_beacon | ransomware | lateral_movement | persistence | data_exfil
+
+OUTPUT FORMAT — ONLY valid JSON, no markdown, no explanation:
+{"command": "query_logs", "params": {"query": "powershell"}}
+{"command": "trigger_backup", "params": {"host": "DESKTOP-X9Y8Z7"}}
+{"command": "submit_verdict", "params": {"verdict": "malicious", "attack_type": "c2_beacon", "affected_hosts": ["DESKTOP-X9Y8Z7"]}}
+
+STRATEGY:
+1. Start with query_logs for suspicious keywords (powershell, EncodedCommand, vssadmin, wmic, curl, rclone)
+2. Use analyze_process on any suspicious process names you find
+3. Check IPs or domains with check_ip_reputation
+4. If malicious: trigger_backup on the affected host(s) BEFORE submitting verdict
+5. Submit verdict with correct attack_type
+
+Never output anything except a single JSON object.
+"""
 
 
-def env_step(base_url: str, action: dict) -> dict:
-    r = requests.post(f"{base_url}/step", json=action, timeout=15)
-    r.raise_for_status()
-    return r.json()
-
-
-def env_grader(base_url: str) -> dict:
-    r = requests.get(f"{base_url}/grader", timeout=10)
-    r.raise_for_status()
-    return r.json()
-
-
-def env_health(base_url: str) -> dict:
-    r = requests.get(f"{base_url}/health", timeout=10)
-    r.raise_for_status()
-    return r.json()
-
-
-# ---------------------------------------------------------------------------
-# Prompt builders
-# ---------------------------------------------------------------------------
-
-def build_user_prompt(step: int, obs: dict, history: list[str]) -> str:
-    """
-    Converts the current observation into a human-readable prompt for the LLM.
-    Includes the full email metadata and a running history of previous steps.
-    """
+def _obs_to_context(obs: dict[str, Any], step: int, max_steps: int) -> str:
     lines = [
-        f"=== EMAIL TRIAGE — Step {step}/{MAX_STEPS} ===",
-        f"Email ID    : {obs.get('email_id', 'unknown')}",
-        f"Subject     : {obs.get('email_subject', '(no subject)')}",
-        f"From        : {obs.get('from_address', '?')}",
-        f"Return-Path : {obs.get('return_path', '?')}",
-        f"Snippet     : {obs.get('email_snippet', '')[:300]}",
-        f"Tier        : {obs.get('difficulty_tier', '?')}",
-        f"Tools used  : {obs.get('tools_used', [])}",
-        "",
+        "=== INCIDENT BUNDLE ===",
+        f"Alert   : {obs.get('alert_summary')}",
+        f"Hosts   : {obs.get('host_count')}   Logs: {obs.get('log_count')}",
+        f"Primary : {obs.get('primary_host')}",
+        f"Step    : {step}/{max_steps}",
+        f"Tools used: {obs.get('tools_used', [])}",
+        f"Backups : {obs.get('backup_triggered_hosts', [])}",
     ]
-
-    if history:
-        lines.append("Your action history so far:")
-        lines.extend(f"  {h}" for h in history[-4:])  # last 4 steps to stay within context
-        lines.append("")
-
-    # give the tool result from the previous step if available
-    if obs.get("tool_result"):
-        lines.append(f"Last tool result:\n{json.dumps(obs['tool_result'], indent=2)}")
-        lines.append("")
-
-    if obs.get("error_message"):
-        lines.append(f"⚠ Last action error: {obs['error_message']}")
-        lines.append("")
-
-    lines.append("What is your next action? Respond with a single JSON object.")
+    # Show initial logs on first step (cap at 30 to control token usage)
+    if step <= 1 and obs.get("initial_logs"):
+        initial = obs["initial_logs"][:30]
+        lines.append(f"\n=== INITIAL LOGS (first {len(initial)} of {obs.get('log_count')}) ===")
+        for lg in initial:
+            lines.append(
+                f"  [{lg.get('timestamp','')}] {lg.get('host_id','')} | "
+                f"{lg.get('event_type','')} | {str(lg.get('process',''))[:50]} | "
+                f"cmd={str(lg.get('commandline',''))[:60]} | "
+                f"domain={lg.get('target_domain')} | ip={lg.get('target_ip')}"
+            )
+    # Tool result
+    if obs.get("tool_used") and obs.get("tool_result"):
+        lines.append(f"\n=== Tool Result: {obs['tool_used']} ===")
+        lines.append(json.dumps(obs["tool_result"], indent=2)[:1500])
+    if not obs.get("success") and obs.get("error_message"):
+        lines.append(f"\n[ERROR] {obs['error_message']}")
     return "\n".join(lines)
 
 
-def parse_action(response_text: str) -> dict | None:
-    """
-    Pulls the first valid JSON object out of the model's response.
-    We're strict here — if the model hallucinates prose we return None
-    and the episode will use a fallback.
-    """
-    text = response_text.strip()
-
-    # strip markdown code fences if present
-    if text.startswith("```"):
-        lines = text.split("\n")
-        text = "\n".join(lines[1:-1]) if len(lines) > 2 else text
-
-    # find first { ... }
-    start = text.find("{")
-    end   = text.rfind("}") + 1
-    if start == -1 or end == 0:
-        return None
-
-    try:
-        return json.loads(text[start:end])
-    except json.JSONDecodeError:
-        return None
-
-
-# ---------------------------------------------------------------------------
-# Single episode runner
-# ---------------------------------------------------------------------------
-
-def run_episode(client: OpenAI, base_url: str, tier: str, ep_num: int) -> dict:
-    """
-    Runs one full episode for the given tier. The LLM decides every action.
-    Returns the grader result dict.
-    """
-    obs     = env_reset(base_url, tier)
-    email_id = obs["email_id"]
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-    history  = []
-
-    print(f"    ep{ep_num:02d}  id={email_id}  subject={obs.get('email_subject','')[:40]}")
-
-    for step in range(1, MAX_STEPS + 1):
-        user_prompt = build_user_prompt(step, obs, history)
-        messages.append({"role": "user", "content": user_prompt})
-
-        # call the LLM
+async def _llm_call_with_retry(
+    oai: AsyncOpenAI,
+    model: str,
+    messages: list[dict],
+    max_retries: int = 4,
+) -> str:
+    """Call LLM with exponential backoff on rate-limit (429) errors."""
+    for attempt in range(max_retries):
         try:
-            completion = client.chat.completions.create(
-                model=MODEL_NAME,
+            chat_resp = await oai.chat.completions.create(
+                model=model,
                 messages=messages,
                 temperature=TEMPERATURE,
-                max_tokens=256,
-                stream=False,
+                max_tokens=MAX_TOKENS,
             )
-            response_text = completion.choices[0].message.content or ""
+            return chat_resp.choices[0].message.content or "{}"
         except Exception as exc:
-            print(f"         ⚠ LLM call failed ({exc}), using fallback verdict")
-            response_text = '{"command":"submit_verdict","params":{"verdict":"escalate"}}'
+            err = str(exc)
+            if "429" in err or "rate_limit" in err.lower() or "rate limit" in err.lower():
+                wait = (2 ** attempt) * 10   # 10s, 20s, 40s, 80s
+                print(f"    [RATE LIMIT] Waiting {wait}s before retry {attempt+1}/{max_retries}...")
+                await asyncio.sleep(wait)
+            else:
+                raise
+    raise RuntimeError(f"LLM call failed after {max_retries} retries (rate limit)")
 
-        messages.append({"role": "assistant", "content": response_text})
 
-        # parse the action
-        action = parse_action(response_text)
-        if action is None:
-            print(f"         ⚠ Unparseable response at step {step}, submitting escalate")
-            action = {"command": "submit_verdict", "params": {"verdict": "escalate"}}
+async def run_episode(
+    oai: AsyncOpenAI,
+    client: httpx.AsyncClient,
+    model: str,
+    tier: str,
+    verbose: bool,
+) -> tuple[float, list[float]]:
+    """Run one episode. Returns (grader_score, per_step_rewards)."""
 
-        # send action to environment
+    resp = await client.post(f"/reset?tier_filter={tier}")
+    resp.raise_for_status()
+    obs = resp.json()
+
+    max_steps = obs.get("max_steps", MAX_STEPS.get(tier, 20))
+
+    messages: list[dict] = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user",   "content": _obs_to_context(obs, 0, max_steps)},
+    ]
+
+    done             = False
+    step             = 0
+    raw_content      = ""
+    step_rewards: list[float] = []
+    cumulative_reward = 0.0
+
+    while not done and step < max_steps:
+        step += 1
+
         try:
-            result = env_step(base_url, action)
-        except requests.HTTPError as exc:
-            if exc.response.status_code == 422:
-                # schema violation — tell the model and retry
-                obs = {**obs, "error_message": str(exc), "tool_result": None}
-                history.append(f"step {step}: schema error — {action.get('command')}")
-                messages.append({
-                    "role": "user",
-                    "content": f"Your last action was rejected (schema error): {exc}\n"
-                               "Please fix the format and try again."
-                })
-                continue
-            raise
+            raw_content = await _llm_call_with_retry(oai, model, messages)
+            cleaned     = _extract_json(raw_content)
+            action      = json.loads(cleaned)
+        except json.JSONDecodeError as exc:
+            if verbose:
+                print(f"  [WARN] JSON parse failed: {exc}")
+            messages.append({"role": "assistant", "content": raw_content})
+            messages.append({"role": "user", "content":
+                f"Your output was not valid JSON. Error: {exc}. "
+                f"Output ONLY a JSON object like: {{\"command\": \"query_logs\", \"params\": {{\"query\": \"powershell\"}}}}"
+            })
+            continue
+        except Exception as exc:
+            if verbose:
+                print(f"  [WARN] LLM call failed: {exc}")
+            break
 
-        reward = result.get("reward", 0.0)
-        done   = result.get("done", False)
-        obs    = result.get("observation", obs)
+        if verbose:
+            cmd = action.get("command", "?")
+            pms = json.dumps(action.get("params", {}))[:80]
+            print(f"  Step {step}: {cmd}({pms})")
 
-        cmd    = action.get("command", "?")
-        history.append(f"step {step}: {cmd} → reward {reward:+.2f}")
-        print(f"         step {step:02d}  {cmd:<22}  reward={reward:+.3f}  done={done}")
+        step_resp = await client.post("/step", json=action)
+        if step_resp.status_code != 200:
+            if verbose:
+                print(f"  [ERROR] /step rejected: {step_resp.text[:100]}")
+            messages.append({"role": "assistant", "content": raw_content})
+            messages.append({"role": "user", "content": f"Action rejected: {step_resp.text[:200]}"})
+            continue
+
+        step_data = step_resp.json()
+        obs       = step_data.get("observation", {})
+        done      = step_data.get("done", False)
+        reward    = step_data.get("reward", 0.0)
+
+        step_rewards.append(reward)
+        cumulative_reward += reward
+
+        if verbose:
+            status = "✅ DONE" if done else "⏳"
+            print(f"    → reward={reward:+.4f} | cumul={cumulative_reward:+.4f} | {status}")
+            if obs.get("error_message"):
+                print(f"    [ENV ERROR] {obs['error_message']}")
+
+        messages.append({"role": "assistant", "content": raw_content})
+        messages.append({"role": "user",      "content": _obs_to_context(obs, step, max_steps)})
 
         if done:
             break
 
-    grader = env_grader(base_url)
-    score  = grader.get("score", 0.0)
-    correct = grader.get("correct", False)
-    print(f"         → grader score={score:.4f}  correct={correct}")
-    return grader
+    # Retrieve grader score
+    grade_resp = await client.get("/grader")
+    if grade_resp.status_code == 200:
+        gdata = grade_resp.json()
+        score = gdata.get("score", 0.0)
+        if verbose:
+            print(f"\n  ── Grader Breakdown ──")
+            breakdown = gdata.get("breakdown", {})
+            for k, v in breakdown.items():
+                if k != "final_score":
+                    print(f"     {k:<30}: {v:+.4f}")
+            print(f"     {'FINAL SCORE':<30}: {score:.4f}")
+            deductions = gdata.get("deductions", [])
+            if deductions:
+                print(f"  ── Deductions ──")
+                for d in deductions:
+                    print(f"     • {d}")
+            print(f"  Expected: verdict={gdata.get('expected_verdict')} | type={gdata.get('expected_attack_type')}")
+            print(f"  Got     : verdict={gdata.get('final_verdict')} | type={gdata.get('final_attack_type')}")
+        return score, step_rewards
+    return 0.0, step_rewards
 
 
-# ---------------------------------------------------------------------------
-# Main loop — runs all three tiers and prints a summary table
-# ---------------------------------------------------------------------------
+async def run_baseline_evaluation(
+    model: str = "gpt-4o-mini",
+    server_url: str = "http://localhost:7860",
+    verbose: bool = True,
+    episodes_per_tier: int = 1,
+) -> dict[str, Any]:
+    """
+    Run episodes per tier (Easy/Medium/Hard) and return full results.
+    Hackathon requirement: complete in < 20 minutes on 2-vCPU / 8 GB.
+    """
+    api_key  = OPENAI_API_KEY
+    base_url = API_BASE_URL
 
-def main() -> None:
+    if not api_key:
+        print("[WARN] No API key found. Set OPENAI_API_KEY, HF_TOKEN, or GROQ_API_KEY.")
+
+    kwargs: dict[str, Any] = {"api_key": api_key or "no-key"}
+    if base_url:
+        kwargs["base_url"] = base_url
+    oai = AsyncOpenAI(**kwargs)
+
+    results: dict[str, Any] = {}
+    tiers = ["Easy", "Medium", "Hard"]
+    t_start = time.time()
+
+    async with httpx.AsyncClient(base_url=server_url, timeout=180.0) as client:
+        for tier in tiers:
+            if verbose:
+                print(f"\n{'='*60}")
+                print(f"  TIER: {tier}  |  Model: {model}  |  Episodes: {episodes_per_tier}")
+                print(f"{'='*60}")
+
+            tier_scores: list[float] = []
+            tier_rewards: list[list[float]] = []
+
+            for ep_idx in range(episodes_per_tier):
+                if verbose and episodes_per_tier > 1:
+                    print(f"\n  ── Episode {ep_idx+1}/{episodes_per_tier} ──")
+                try:
+                    score, rewards = await run_episode(oai, client, model, tier, verbose)
+                    tier_scores.append(score)
+                    tier_rewards.append(rewards)
+                    if verbose:
+                        print(f"  ⟹ Episode score: {score:.4f}")
+                except Exception as exc:
+                    if verbose:
+                        print(f"  [FATAL] Episode failed: {exc}")
+                    tier_scores.append(0.0)
+
+            avg = sum(tier_scores) / len(tier_scores) if tier_scores else 0.0
+            results[tier] = {
+                "average_score": round(avg, 4),
+                "scores":        [round(s, 4) for s in tier_scores],
+                "step_rewards":  tier_rewards,
+            }
+            if verbose:
+                print(f"\n  ⟹ {tier} Average: {avg:.4f}")
+
+    elapsed = time.time() - t_start
+    results["_meta"] = {
+        "model":       model,
+        "server_url":  server_url,
+        "elapsed_sec": round(elapsed, 1),
+        "episodes":    episodes_per_tier,
+    }
+
+    return results
+
+
+async def main() -> None:
     parser = argparse.ArgumentParser(
-        description="SOC Triage inference script — OpenEnv hackathon entry"
+        description="Baseline SOC Log Triage agent — OpenEnv hackathon submission"
     )
-    parser.add_argument("--env-url",  default=ENV_URL,
-                        help="SOC Triage environment base URL")
-    parser.add_argument("--episodes", type=int, default=1,
-                        help="Episodes per tier (default 1 — keep under 20 min)")
+    parser.add_argument("--model",      default=os.getenv("MODEL_NAME", "gpt-4o-mini"))
+    parser.add_argument("--server-url", default=os.getenv("SOC_SERVER_URL", "http://localhost:7860"))
+    parser.add_argument("--episodes",   type=int, default=1, help="Episodes per tier")
+    parser.add_argument("--quiet",      action="store_true")
     args = parser.parse_args()
 
-    base_url = args.env_url
-
-    # --- sanity checks ---
-    if not HF_TOKEN and "huggingface.co" in API_BASE_URL:
-        print("⚠  HF_TOKEN is not set. HF Inference API calls will likely fail.")
-        print("   Set HF_TOKEN to your Hugging Face token and retry.")
-
-    print(f"\n🌐 Environment : {base_url}")
-    print(f"🤖 Model       : {MODEL_NAME}")
-    print(f"🔗 LLM API     : {API_BASE_URL}")
-    print(f"📊 Episodes    : {args.episodes} per tier\n")
-
-    # health check
     try:
-        h = env_health(base_url)
-        print(f"✅ Environment health: {h.get('status')}  v{h.get('version')}\n")
+        results = await run_baseline_evaluation(
+            model=args.model,
+            server_url=args.server_url,
+            verbose=not args.quiet,
+            episodes_per_tier=args.episodes,
+        )
+
+        meta = results.pop("_meta", {})
+        print(f"\n{'='*60}")
+        print(f"  BASELINE RESULTS  |  model={meta.get('model')}")
+        print(f"  Elapsed: {meta.get('elapsed_sec')}s")
+        print(f"{'='*60}")
+        for tier in ["Easy", "Medium", "Hard"]:
+            if tier in results:
+                r = results[tier]
+                print(f"  {tier:<8}: {r['average_score']:.4f}  {r['scores']}")
+        print(f"{'='*60}")
+        print(json.dumps({**results, "_meta": meta}, indent=2))
+
     except Exception as exc:
-        print(f"❌ Cannot reach environment at {base_url}: {exc}")
-        print("   Make sure the server is running before executing inference.py")
+        print(f"\n[FATAL] {exc}")
         sys.exit(1)
-
-    client = make_client()
-
-    tiers   = ["Easy", "Medium", "Hard"]
-    results = {t: [] for t in tiers}
-
-    start_time = time.time()
-
-    for tier in tiers:
-        print(f"{'─'*60}")
-        print(f"  Tier: {tier}")
-        print(f"{'─'*60}")
-        for ep in range(1, args.episodes + 1):
-            grader = run_episode(client, base_url, tier, ep)
-            results[tier].append(grader)
-
-    elapsed = time.time() - start_time
-
-    # --- summary table ---
-    print(f"\n{'═'*60}")
-    print("  BASELINE RESULTS  —  SOC Phishing Triage Environment")
-    print(f"  Model: {MODEL_NAME}")
-    print(f"{'═'*60}")
-    print(f"  {'Tier':<10}  {'Ep':>3}  {'Score':>7}  {'Correct':>8}  {'Steps':>6}")
-    print(f"  {'─'*45}")
-
-    grand_total_score = 0.0
-    grand_total_correct = 0
-    grand_total_ep = 0
-
-    for tier in tiers:
-        tier_scores   = [r.get("score",   0.0)   for r in results[tier]]
-        tier_correct  = [r.get("correct", False)  for r in results[tier]]
-        tier_steps    = [r.get("step_count", "?") for r in results[tier]]
-
-        for i, (sc, cor, st) in enumerate(zip(tier_scores, tier_correct, tier_steps)):
-            print(f"  {tier:<10}  {i+1:>3}  {sc:>7.4f}  {'✓' if cor else '✗':>8}  {str(st):>6}")
-
-        avg_score = sum(tier_scores) / len(tier_scores) if tier_scores else 0.0
-        print(f"  {'avg':>10}  {'':>3}  {avg_score:>7.4f}")
-        print()
-
-        grand_total_score   += sum(tier_scores)
-        grand_total_correct += sum(tier_correct)
-        grand_total_ep      += len(tier_scores)
-
-    overall_avg = grand_total_score / grand_total_ep if grand_total_ep else 0.0
-    overall_acc = grand_total_correct / grand_total_ep if grand_total_ep else 0.0
-
-    print(f"{'─'*60}")
-    print(f"  Overall avg score : {overall_avg:.4f}")
-    print(f"  Overall accuracy  : {grand_total_correct}/{grand_total_ep}  ({overall_acc:.1%})")
-    print(f"  Total runtime     : {elapsed:.1f}s")
-    print(f"{'═'*60}\n")
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

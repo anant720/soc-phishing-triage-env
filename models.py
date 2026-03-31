@@ -1,35 +1,34 @@
 """
-All the Pydantic schemas live here — Action, Observation, State, and every
-sub-model the tools return. If you want to know what shape the data takes
-at any point in the environment, this is where to look.
+All Pydantic schemas for the SOC Log Triage Environment.
 
-Everything is strictly typed. If an agent sends a bad command name or forgets
-a required parameter, Pydantic catches it here before it ever reaches the
-environment logic.
+The environment presents the agent with a bundle of Windows Sysmon endpoint
+logs and asks it to:
+  1. Investigate using log-analysis tools.
+  2. Trigger a backup on compromised host(s) if malicious.
+  3. Submit a verdict: malicious | benign | escalate
+     with an attack_type classification when malicious.
 """
-
 from __future__ import annotations
 
 from enum import Enum
-from typing import Any, Literal
+from typing import Any
 
 from pydantic import AliasChoices, BaseModel, Field, field_validator, model_validator
 
 # ---------------------------------------------------------------------------
-# Try to use real OpenEnv base classes if installed, otherwise fall back
-# to plain BaseModel so the code still runs without the full SDK
+# OpenEnv base class shim
 # ---------------------------------------------------------------------------
 try:
     from openenv.core.models import Action, Observation, State  # type: ignore
-except ImportError:  # pragma: no cover
+except ImportError:
     class Action(BaseModel):  # type: ignore
-        """openenv not installed — using plain BaseModel as stand-in"""
+        """openenv not installed — stand-in base."""
 
     class Observation(BaseModel):  # type: ignore
-        """openenv not installed — using plain BaseModel as stand-in"""
+        """openenv not installed — stand-in base."""
 
     class State(BaseModel):  # type: ignore
-        """openenv not installed — using plain BaseModel as stand-in"""
+        """openenv not installed — stand-in base."""
 
 
 # ===========================================================================
@@ -37,14 +36,27 @@ except ImportError:  # pragma: no cover
 # ===========================================================================
 
 class ToolName(str, Enum):
+    """All actions available to the agent.
+
+    Investigation tools
+    -------------------
+    QUERY_LOGS          — keyword / regex search over the incident log bundle.
+    ANALYZE_PROCESS     — retrieve process tree rooted at a given process name or host.
+    CHECK_IP_REPUTATION — query threat-intel DB for an IP address.
+    CHECK_FILE_HASH     — look up a SHA-256 / MD5 hash against the IOC database.
+    GET_HOST_SUMMARY    — list all distinct events / processes seen on one host.
+
+    Response actions
+    ----------------
+    TRIGGER_BACKUP  — immediately back up a compromised host (required for full score).
+    SUBMIT_VERDICT  — emit final classification and end the episode.
     """
-    The five things an agent can do. That's it. Anything else gets
-    rejected by the validator before it touches the environment.
-    """
-    ANALYZE_HEADERS     = "analyze_headers"
-    LOOKUP_THREAT_INTEL = "lookup_threat_intel"
-    SANDBOX_URL         = "sandbox_url"
-    WHOIS_LOOKUP        = "whois_lookup"
+    QUERY_LOGS          = "query_logs"
+    ANALYZE_PROCESS     = "analyze_process"
+    CHECK_IP_REPUTATION = "check_ip_reputation"
+    CHECK_FILE_HASH     = "check_file_hash"
+    GET_HOST_SUMMARY    = "get_host_summary"
+    TRIGGER_BACKUP      = "trigger_backup"
     SUBMIT_VERDICT      = "submit_verdict"
 
     @classmethod
@@ -52,361 +64,299 @@ class ToolName(str, Enum):
         return [t.value for t in cls]
 
 
-class Verdict(str, Enum):
-    """What the agent can submit as its final call on the email."""
-    PHISHING = "phishing"
-    BENIGN   = "benign"
-    ESCALATE = "escalate"   # not sure? pass it up to a Tier-2 analyst
+class AttackType(str, Enum):
+    """Classification label required when verdict == 'malicious'."""
+    C2_BEACON        = "c2_beacon"
+    RANSOMWARE       = "ransomware"
+    LATERAL_MOVEMENT = "lateral_movement"
+    PERSISTENCE      = "persistence"
+    DATA_EXFIL       = "data_exfil"
+    BENIGN           = "benign"      # used internally; not a valid submit_verdict attack_type
+
+
+class LogVerdict(str, Enum):
+    """Top-level verdict the agent submits."""
+    MALICIOUS = "malicious"
+    BENIGN    = "benign"
+    ESCALATE  = "escalate"
 
 
 class DifficultyTier(str, Enum):
-    """The three tiers in the database — Easy for warm-up, Hard to actually stress the model."""
     EASY   = "Easy"
     MEDIUM = "Medium"
     HARD   = "Hard"
 
 
-class AdversarialPayloadType(str, Enum):
-    """What kind of nasty payload we injected into a Hard-tier phishing email."""
-    NONE             = "none"
-    IDPI_HTML        = "idpi_html"        # hidden HTML span that tries to override the model
-    IDPI_WHITESPACE  = "idpi_whitespace"  # zero-width chars — invisible to humans, visible to LLMs
-    URL_TYPOSQUAT    = "url_typosquat"    # domain that looks like a real one at a glance
-    URL_IP_BASED     = "url_ip_based"     # bare IP to dodge domain reputation checks
-    URL_PADDED       = "url_padded"       # lots of redirect noise to hide where it actually goes
-    COMBINED         = "combined"         # both IDPI and URL tricks at once
-
-
 # ===========================================================================
-# Action Schema
+# Action schema
 # ===========================================================================
 
-# the allowed commands — anything not in here gets rejected immediately
 _VALID_COMMANDS: frozenset[str] = frozenset(ToolName.valid_values())
 
-# what parameters each command actually needs — validated after the command check
 _REQUIRED_PARAMS: dict[str, list[str]] = {
-    "analyze_headers":     ["email_id"],
-    "lookup_threat_intel": ["domain"],
-    "sandbox_url":         ["url"],
-    "whois_lookup":        ["domain"],
+    "query_logs":          ["query"],
+    "analyze_process":     ["process_name"],
+    "check_ip_reputation": ["ip"],
+    "check_file_hash":     ["hash"],
+    "get_host_summary":    ["host"],
+    "trigger_backup":      ["host"],
     "submit_verdict":      ["verdict"],
 }
 
 
-class TriageAction(Action):
+class LogTriageAction(Action):
     """
-    Type-safe contract for every agent action.
-
-    The ``command`` field (aliased as ``tool`` for API backward-compatibility)
-    must be one of the five predefined SOC tools.  Pydantic enforces this before
-    any environment logic is invoked, intercepting hallucinated or malformed
-    LLM outputs at the schema boundary.
+    Type-safe action contract for every agent step.
 
     Examples
     --------
-    Invoke a tool::
+    Query logs::
 
-        TriageAction(command="analyze_headers", params={"email_id": "42"})
+        LogTriageAction(command="query_logs", params={"query": "powershell -EncodedCommand"})
 
-    Backward-compatible alias::
+    Check an IP::
 
-        TriageAction(tool="sandbox_url", parameters={"url": "http://evil.com"})
+        LogTriageAction(command="check_ip_reputation", params={"ip": "185.220.101.45"})
 
-    Submit a verdict::
+    Trigger backup before submitting::
 
-        TriageAction(command="submit_verdict", params={"verdict": "phishing"})
+        LogTriageAction(command="trigger_backup", params={"host": "DESKTOP-X9Y8Z7"})
+
+    Submit verdict (required when malicious)::
+
+        LogTriageAction(command="submit_verdict", params={
+            "verdict": "malicious",
+            "attack_type": "c2_beacon",
+            "affected_hosts": ["DESKTOP-X9Y8Z7"]
+        })
     """
 
-    # Primary field names (new canonical API)
     command: str = Field(
         ...,
         validation_alias=AliasChoices("command", "tool"),
-        description=(
-            f"SOC tool to invoke. Must be one of: {sorted(_VALID_COMMANDS)}"
-        ),
-        examples=["analyze_headers", "submit_verdict"],
+        description=f"Tool to invoke. Must be one of: {sorted(_VALID_COMMANDS)}",
     )
     params: dict[str, Any] = Field(
         default_factory=dict,
         validation_alias=AliasChoices("params", "parameters"),
         description="Tool-specific key-value parameters.",
     )
-
-    # Backward-compatibility aliases accepted from the existing API surface
-    # (tool → command,  parameters → params)
     model_config = {"populate_by_name": True}
-
-    # ------------------------------------------------------------------
-    # Validators
-    # ------------------------------------------------------------------
 
     @field_validator("command", mode="before")
     @classmethod
     def validate_command(cls, v: Any) -> str:
-        """
-        Strictly validate that ``command`` is a known SOC tool.
-
-        Applies case-insensitive normalisation so that an LLM emitting
-        "Analyze_Headers" instead of "analyze_headers" is corrected rather
-        than rejected outright.
-        """
         if isinstance(v, ToolName):
             return v.value
         normalised = str(v).strip().lower().replace("-", "_").replace(" ", "_")
         if normalised not in _VALID_COMMANDS:
             raise ValueError(
-                f"Unknown command '{v}'. "
-                f"Valid commands: {sorted(_VALID_COMMANDS)}. "
-                f"Check your spelling — this error prevents environment crashes."
+                f"Unknown command '{v}'. Valid: {sorted(_VALID_COMMANDS)}"
             )
         return normalised
 
     @model_validator(mode="after")
-    def validate_required_params(self) -> "TriageAction":
-        """
-        Verify that all required parameters for the chosen command are present.
-
-        Returns the model unchanged when valid; raises ValueError with a
-        self-correcting hint when required params are missing.
-        """
+    def validate_required_params(self) -> "LogTriageAction":
         required = _REQUIRED_PARAMS.get(self.command, [])
-        missing  = [k for k in required if k not in self.params]
+        missing = [k for k in required if k not in self.params]
         if missing:
             raise ValueError(
-                f"Command '{self.command}' requires parameter(s): {missing}. "
-                f"Full required params: {required}. "
-                f"Please re-issue the action with the missing fields."
+                f"Command '{self.command}' requires params: {missing}. "
+                f"Provide them and re-submit."
             )
         return self
 
-    # ------------------------------------------------------------------
-    # Backward-compatibility properties
-    # ------------------------------------------------------------------
-
     @property
     def tool(self) -> ToolName:
-        """Legacy alias: returns ``command`` as a ToolName enum."""
         return ToolName(self.command)
 
     @property
     def parameters(self) -> dict[str, Any]:
-        """Legacy alias: returns ``params``."""
         return self.params
 
     @classmethod
-    def from_legacy(cls, tool: str | ToolName, parameters: dict[str, Any]) -> "TriageAction":
-        """Construct from the old (tool, parameters) API surface."""
+    def from_legacy(cls, tool: str | ToolName, parameters: dict[str, Any]) -> "LogTriageAction":
         cmd = tool.value if isinstance(tool, ToolName) else str(tool)
         return cls(command=cmd, params=parameters)
 
 
 # ===========================================================================
-# Tool result sub-models (unchanged structure, added docstring clarity)
+# Tool result sub-models
 # ===========================================================================
 
-class HeaderAnalysisResult(BaseModel):
-    """
-    Output of the ``analyze_headers`` tool.
-
-    Fields matching the triage_scenarios.db ``spf_status`` / ``dkim_status``
-    columns so results are always consistent with the ground-truth metadata.
-    """
-    spf_status:        str  = Field(..., description="SPF check result: Pass | Fail | Neutral | none")
-    dkim_status:       str  = Field(..., description="DKIM check result: Pass | Fail | none")
-    dmarc_status:      str  = Field(..., description="DMARC policy result: Pass | Fail | none")
-    reply_to_mismatch: bool = Field(..., description="True when Return-Path domain ≠ From domain")
-    originating_ip:    str  = Field(..., description="Sending mail-server IP address")
-    ip_geolocation:    str  = Field(..., description="Country/city of originating IP")
-    suspicious_flags:  list[str] = Field(
-        default_factory=list,
-        description="Anomaly flags: SPF_FAIL, DKIM_FAIL, DMARC_FAIL, REPLY_TO_MISMATCH, etc.",
-    )
+class LogEntry(BaseModel):
+    """A single sanitised Sysmon log row returned to the agent."""
+    id:             int
+    host_id:        str
+    timestamp:      str
+    event_type:     str
+    process:        str | None = None
+    commandline:    str | None = None
+    target_ip:      str | None = None
+    target_domain:  str | None = None
+    parent_process: str | None = None
+    details:        str | None = None   # JSON blob (is_malicious NEVER included)
 
 
-class ThreatIntelResult(BaseModel):
-    """Output of the ``lookup_threat_intel`` tool."""
-    domain:                  str
-    reputation_score:        float = Field(..., ge=0.0, le=1.0,
-                                           description="0.0 = clean, 1.0 = known malicious")
-    known_malware_families:  list[str] = Field(default_factory=list)
-    first_seen:              str  = Field(..., description="ISO-8601 date first observed")
-    last_seen:               str  = Field(..., description="ISO-8601 date last observed")
-    tags:                    list[str] = Field(default_factory=list)
+class QueryLogsResult(BaseModel):
+    """Output of query_logs."""
+    query:          str
+    matches:        list[LogEntry] = Field(default_factory=list)
+    total_found:    int
+    query_time_ms:  int
+    note:           str = "Results capped at 20. Refine query if needed."
 
 
-class SandboxResult(BaseModel):
-    """Output of the ``sandbox_url`` tool."""
-    url:                           str
-    redirects_to:                  list[str] = Field(default_factory=list)
-    page_title:                    str  = ""
-    credential_harvesting_detected: bool = False
-    malware_download_detected:      bool = False
-    risk_level:                    str  = Field(
-        ...,
-        description="low | medium | high | critical",
-    )
-
-    @field_validator("risk_level")
-    @classmethod
-    def validate_risk_level(cls, v: str) -> str:
-        allowed = {"low", "medium", "high", "critical"}
-        if v.lower() not in allowed:
-            raise ValueError(f"risk_level must be one of {allowed}, got '{v}'")
-        return v.lower()
+class ProcessTreeNode(BaseModel):
+    """One node in a process tree."""
+    host_id:        str
+    process:        str
+    commandline:    str | None = None
+    parent_process: str | None = None
+    timestamp:      str
+    children:       list["ProcessTreeNode"] = Field(default_factory=list)
 
 
-class WhoisResult(BaseModel):
-    """Output of the ``whois_lookup`` tool."""
-    domain:              str
-    registrar:           str
-    creation_date:       str  = Field(..., description="ISO-8601 registration date")
-    expiry_date:         str  = Field(..., description="ISO-8601 expiry date")
-    registrant_country:  str
-    privacy_protected:   bool = Field(..., description="True when WHOIS privacy is active")
-    age_days:            int  = Field(..., description="Domain age in days at time of lookup")
+class AnalyzeProcessResult(BaseModel):
+    """Output of analyze_process."""
+    process_name:   str
+    hosts_seen_on:  list[str]
+    tree:           list[ProcessTreeNode] = Field(default_factory=list)
+    total_events:   int
+
+
+class IPReputationResult(BaseModel):
+    """Output of check_ip_reputation."""
+    ip:               str
+    found:            bool
+    reputation_score: float = Field(0.0, ge=0.0, le=1.0,
+                                    description="0.0 = clean, 1.0 = known malicious")
+    category:         str | None = None
+    country:          str | None = None
+    asn:              str | None = None
+    known_malware:    str | None = None
+    first_seen:       str | None = None
+    last_seen:        str | None = None
+
+
+class FileHashResult(BaseModel):
+    """Output of check_file_hash."""
+    hash:        str
+    found:       bool
+    filename:    str | None = None
+    is_malicious: bool = False
+    family:      str | None = None
+    severity:    str | None = None
+
+
+class HostSummaryResult(BaseModel):
+    """Output of get_host_summary."""
+    host:           str
+    total_events:   int
+    event_types:    dict[str, int]       # event_type → count
+    processes_seen: list[str]
+    ips_contacted:  list[str]
+    domains_contacted: list[str]
+    sample_logs:    list[LogEntry] = Field(default_factory=list)
+
+
+class BackupResult(BaseModel):
+    """Output of trigger_backup."""
+    host:      str
+    status:    str     # "initiated" | "already_backed_up"
+    backup_id: str
+    timestamp: str
+    message:   str = ""
 
 
 # ===========================================================================
-# Observation Schema
+# Observation schema
 # ===========================================================================
 
-class TriageObservation(Observation):
+class LogTriageObservation(Observation):
     """
     Structured feedback returned to the agent after every step.
 
-    The ``success`` flag and ``error_message`` field implement the
-    **error-handling loop** required by the hackathon spec: if the agent
-    triggers a schema validation error (e.g., missing URL for sandbox_url),
-    the environment catches it and echoes the exact error back so the agent
-    can self-correct on the next turn without crashing the episode.
-
-    Flow
-    ----
-    1. On ``reset()``: email metadata only; success=True, tool_result=None.
-    2. On successful tool call: success=True, tool_result populated, error_message=None.
-    3. On validation/tool error: success=False, tool_result=None, error_message set.
-    4. After ``submit_verdict``: verdict fields populated, episode ends.
+    On reset() : initial_logs populated, tool_result=None.
+    On tool call: tool_result populated, success=True (or error_message set).
+    On verdict  : verdict fields populated, episode ends.
     """
 
-    # ── Email metadata (always present) ────────────────────────────────────
-    email_id:           str
-    email_subject:      str
-    email_sender:       str
-    email_body_snippet: str  = Field(..., description="First 400 chars of email body")
+    # ── Incident metadata (always present) ────────────────────────────────
+    incident_id:    str
+    alert_summary:  str  = Field(..., description="One-line SIEM alert that triggered this episode.")
+    host_count:     int  = Field(..., description="Number of hosts in this incident bundle.")
+    log_count:      int  = Field(..., description="Total log entries in this incident bundle.")
+    primary_host:   str  = Field(..., description="Host where the alert originated.")
 
-    # ── Adversarial metadata (never revealed to agent directly) ────────────
-    difficulty_tier:         DifficultyTier | None = Field(
-        default=None,
-        description="Revealed only after verdict — used by grader, not agent.",
-        exclude=True,   # hidden from agent JSON serialisation
-    )
-    adversarial_payload_type: AdversarialPayloadType | None = Field(
-        default=None,
-        description="Type of adversarial payload injected (hidden from agent).",
-        exclude=True,
-    )
-
-    # ── Step result ─────────────────────────────────────────────────────────
-    success:       bool               = Field(True,  description="False when a tool or validation error occurred.")
-    tool_used:     ToolName | None    = None
-    tool_result:   dict[str, Any] | None = None
-    error_message: str | None         = Field(
-        None,
-        description=(
-            "Set when success=False. Contains the exact validation or tool error "
-            "so the agent can self-correct on the next step."
-        ),
-    )
-
-    # ── Episode progress ─────────────────────────────────────────────────────
-    step_number:          int          = Field(..., ge=0)
-    max_steps:            int          = Field(..., ge=1)
-    available_tools:      list[ToolName] = Field(default_factory=list)
-    tools_used:           list[ToolName] = Field(
+    # ── Initial view (first 10 logs shown on reset, no tool needed) ───────
+    initial_logs:   list[LogEntry] = Field(
         default_factory=list,
-        description="Ordered list of tools the agent has successfully invoked this episode.",
+        description="First 10 log entries from the bundle, sorted by timestamp.",
     )
 
-    # ── Verdict fields (populated only after submit_verdict) ────────────────
-    verdict_submitted: bool          = False
-    final_verdict:     Verdict | None = None
-    correct_label:     Verdict | None = None  # revealed only after verdict submission
-    reward:            float | None   = None
+    # ── Step result ───────────────────────────────────────────────────────
+    success:        bool               = True
+    tool_used:      ToolName | None    = None
+    tool_result:    dict[str, Any] | None = None
+    error_message:  str | None         = None
 
-    # Backward-compatible alias
-    @property
-    def tools_invoked_so_far(self) -> list[ToolName]:
-        return self.tools_used
+    # ── Episode progress ──────────────────────────────────────────────────
+    step_number:    int           = Field(..., ge=0)
+    max_steps:      int           = Field(..., ge=1)
+    available_tools: list[ToolName] = Field(default_factory=list)
+    tools_used:     list[ToolName]  = Field(default_factory=list)
+
+    # ── Backup tracking ───────────────────────────────────────────────────
+    backup_triggered_hosts: list[str] = Field(
+        default_factory=list,
+        description="Hosts for which trigger_backup has been called this episode.",
+    )
+
+    # ── Verdict fields (after submit_verdict) ─────────────────────────────
+    verdict_submitted:   bool               = False
+    final_verdict:       LogVerdict | None  = None
+    final_attack_type:   AttackType | None  = None
+    final_affected_hosts: list[str]         = Field(default_factory=list)
+    correct_verdict:     LogVerdict | None  = None   # revealed after submission
+    correct_attack_type: AttackType | None  = None   # revealed after submission
+    reward:              float | None        = None
 
 
 # ===========================================================================
-# State Schema
+# State schema (server-side ground truth)
 # ===========================================================================
 
-class TriageState(State):
+class LogTriageState(State):
     """
-    Server-side episode state — returned by ``GET /state``.
-
-    The ``expected_verdict`` and ``tools_used`` fields are the **grader
-    contract**: the deterministic reward function uses them to penalise
-    agents that submit verdicts without performing the required investigative
-    steps (e.g., submitting without calling analyze_headers or sandbox_url).
-
-    ``expected_verdict`` is never sent to the agent during an episode;
-    it is used internally by the environment and can be inspected by
-    evaluation harnesses.
+    Server-side episode state — returned by GET /state.
+    Contains ground truth used by the grader (never sent to agent during episode).
     """
 
-    # ── Identity ─────────────────────────────────────────────────────────────
+    # ── Identity ──────────────────────────────────────────────────────────
     episode_id:      str
-    current_email_id: str   = Field(..., description="DB row id of the active scenario.")
-    email_subject:   str
+    incident_id:     str
+    alert_summary:   str
+    primary_host:    str
+    affected_hosts:  list[str] = Field(default_factory=list)
 
-    # ── Progress counters ────────────────────────────────────────────────────
-    step_count:      int   = 0
-    max_steps:       int   = 10
+    # ── Progress ──────────────────────────────────────────────────────────
+    step_count:      int  = 0
+    max_steps:       int  = 12
 
-    # ── Grader contract ──────────────────────────────────────────────────────
-    expected_verdict: bool = Field(
-        ...,
-        description=(
-            "Ground-truth is_phishing flag from the DB (True=phishing, False=benign). "
-            "Used by the reward function; never exposed to the agent."
-        ),
-    )
-    tools_used: list[str] = Field(
-        default_factory=list,
-        description=(
-            "Ordered list of tool names the agent has successfully invoked. "
-            "The grader requires at least one of [analyze_headers, sandbox_url, "
-            "lookup_threat_intel, whois_lookup] before a verdict is accepted "
-            "for full reward credit."
-        ),
-    )
-    min_tools_required: int = Field(
-        default=1,
-        description="Minimum distinct tool calls required for full reward credit.",
-    )
+    # ── Grader contract (ground truth, never exposed to agent) ────────────
+    expected_verdict:     LogVerdict   = Field(..., description="Ground truth verdict.")
+    expected_attack_type: AttackType   = Field(..., description="Ground truth attack classification.")
+    difficulty_tier:      DifficultyTier | None = None
 
-    # ── Verdict tracking ──────────────────────────────────────────────────────
-    verdict_submitted: bool          = False
-    final_verdict:     Verdict | None = None
-    cumulative_reward: float         = 0.0
-
-    # ── Difficulty metadata (for evaluation reporting) ────────────────────────
-    difficulty_tier:         DifficultyTier | None      = None
-    adversarial_payload_type: AdversarialPayloadType | None = None
-
-    @property
-    def investigation_complete(self) -> bool:
-        """True if the agent has called the minimum required number of tools."""
-        return len(set(self.tools_used)) >= self.min_tools_required
-
-    # Backward-compat alias
-    @property
-    def email_id(self) -> str:
-        return self.current_email_id
+    # ── Agent decisions ───────────────────────────────────────────────────
+    tools_used:          list[str]          = Field(default_factory=list)
+    backup_triggered_hosts: list[str]       = Field(default_factory=list)
+    verdict_submitted:   bool               = False
+    final_verdict:       LogVerdict | None  = None
+    final_attack_type:   AttackType | None  = None
+    final_affected_hosts: list[str]         = Field(default_factory=list)
+    cumulative_reward:   float              = 0.0
 
     @property
     def tools_invoked(self) -> list[str]:

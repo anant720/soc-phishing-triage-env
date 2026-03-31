@@ -1,5 +1,6 @@
 # HF Spaces / OpenEnv Docker build
-# Uses a standard Python base since openenv-base may not be on HF's builders
+# Default CMD: FastAPI REST API on port 7860 (required for openenv validate + judge automation)
+# For interactive Gradio demo: docker run -e GRADIO_DEMO=1 ...
 FROM python:3.11-slim
 
 # System deps
@@ -20,16 +21,23 @@ COPY --chown=user server/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
-# Copy the full project in
+# Copy the full project
 COPY --chown=user . .
 
-# Make sure Python can find the root-level modules
+# Python module resolution
 ENV PYTHONPATH=/home/user/app
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+# Build incident DB if not already present
+RUN python data/build_incidents.py
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
     CMD curl -f http://localhost:7860/health || exit 1
 
-# HF Spaces uses port 7860
 EXPOSE 7860
+ENV PORT=7860
 
-CMD ["uvicorn", "server.app:app", "--host", "0.0.0.0", "--port", "7860"]
+# Default: FastAPI REST API (required by openenv validate and judge automation)
+# Set GRADIO_DEMO=1 to run the interactive UI instead
+CMD ["sh", "-c", \
+     "if [ \"$GRADIO_DEMO\" = '1' ]; then python gradio_demo.py; \
+      else uvicorn server.app:app --host 0.0.0.0 --port 7860; fi"]

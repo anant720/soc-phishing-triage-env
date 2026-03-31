@@ -1,19 +1,70 @@
-name: soc-phishing-triage
-version: "1.0.0"
-description: Autonomous Tier-1 SOC phishing investigation environment.
+name: soc-log-triage-env
+version: "2.0.0"
+description: >
+  Autonomous SOC Endpoint Log Triage — OpenEnv-compliant RL environment.
+  An AI agent acts as a Tier-1 SOC analyst: investigates Windows Sysmon log bundles
+  (50–200 logs per incident), identifies attack type, triggers emergency backups on
+  compromised hosts, and submits a classified verdict scored 0.0–1.0.
 
-hf_space: openenv/soc-triage-env
+hf_space: anant72/soc-phishing-triage-env
 
 server:
-  port: 8000
+  port: 7860
   host: "0.0.0.0"
-  dockerfile: server/Dockerfile
+  dockerfile: Dockerfile
 
 environment:
-  max_steps_per_episode: 10
+  max_steps_per_episode: 28    # Medium-tier default; Easy=20, Hard=40
+  tasks:
+    - id: easy
+      tier: Easy
+      description: >
+        ~50 Sysmon logs from 1 host. PowerShell -EncodedCommand beaconing to a
+        C2 domain, OR registry Run key written by a suspicious process.
+        Signal is detectable from query_logs alone.
+      max_steps: 20
+      ideal_steps: 6
+
+    - id: medium
+      tier: Medium
+      description: >
+        ~100 Sysmon logs from 1-2 hosts. Registry persistence + suspicious
+        outbound IP; agent must correlate process tree with threat-intel.
+        Requires 2+ tool groups.
+      max_steps: 28
+      ideal_steps: 9
+
+    - id: hard
+      tier: Hard
+      description: >
+        ~200 Sysmon logs across 2-4 hosts. Lateral movement, ransomware kill-chain,
+        or LOLBins (wmic/mshta/certutil). No obvious malware name. Requires
+        cross-host process correlation, IOC checks, and a backup before verdict.
+      max_steps: 40
+      ideal_steps: 14
+
   reward:
-    correct_verdict: 1.0
-    incorrect_verdict: -1.0
-    escalate_ambiguous: 0.5
-    tool_use_bonus: 0.05
-    timeout_penalty: -0.5
+    correct_verdict:      1.0
+    wrong_verdict:       -1.0
+    escalate_clear_case: -0.2
+    unique_tool_call:     0.05
+    tool_error:          -0.05
+    per_step_penalty:    -0.02
+    timeout_penalty:     -0.30
+
+  grader_components:
+    verdict:              0.30
+    tools_malicious:      0.25
+    tools_benign:         0.35
+    attack_type:          0.20
+    backup_malicious:     0.15
+    no_false_backup:      0.25
+    efficiency:           0.10
+
+  grader_penalties:
+    wrong_verdict:       -0.25
+    no_investigation:    -0.20
+    rush_verdict:        -0.10
+    false_backup:        -0.10
+    backup_wrong_host:   -0.08
+    excess_steps:        -0.05

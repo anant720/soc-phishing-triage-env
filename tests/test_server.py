@@ -1,147 +1,288 @@
 """
-End-to-end tests for every endpoint in the server.
-I test both the new (command/params) and old (tool/parameters) API shapes
-because we promised backwards compatibility and I want to make sure we didn't break it.
+Integration tests for the SOC Log Triage Environment API endpoints.
+All tests use FastAPI TestClient (no live server needed).
 """
 import pytest
 from fastapi.testclient import TestClient
+
 from server.app import app
 
 client = TestClient(app)
 
 
+# ---------------------------------------------------------------------------
+# /health
+# ---------------------------------------------------------------------------
+
 def test_health():
-    response = client.get("/health")
-    assert response.status_code == 200
-    data = response.json()
+    resp = client.get("/health")
+    assert resp.status_code == 200
+    data = resp.json()
     assert data["status"] == "ok"
-    assert data["version"] == "0.1.0"
+    assert "soc-log-triage-env" in data["environment"]
 
 
-def test_reset_returns_email_metadata():
+# ---------------------------------------------------------------------------
+# /reset
+# ---------------------------------------------------------------------------
+
+def test_reset_returns_incident_metadata():
     resp = client.post("/reset")
     assert resp.status_code == 200
     obs = resp.json()
-    assert "email_id" in obs
-    assert "email_subject" in obs
+    assert "incident_id" in obs
+    assert "alert_summary" in obs
+    assert "primary_host" in obs
+    assert obs["host_count"] >= 1
+    assert obs["log_count"] > 0
     assert obs["step_number"] == 0
-    assert obs["success"] is True
-    assert obs["error_message"] is None
-    assert obs["tools_used"] == []
+    assert obs["max_steps"] > 0
+    assert isinstance(obs["initial_logs"], list)
+    # All logs are returned now (no cap) — count must match log_count field
+    assert len(obs["initial_logs"]) == obs["log_count"]
 
 
-def test_step_new_api():
-    """Use the current API shape (command + params) and make sure it works end to end."""
+def test_reset_tier_filter_easy():
+    resp = client.post("/reset?tier_filter=Easy")
+    assert resp.status_code == 200
+
+
+def test_reset_tier_filter_medium():
+    resp = client.post("/reset?tier_filter=Medium")
+    assert resp.status_code == 200
+
+
+def test_reset_tier_filter_hard():
+    resp = client.post("/reset?tier_filter=Hard")
+    assert resp.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# /step — tool calls
+# ---------------------------------------------------------------------------
+
+def test_step_query_logs():
     client.post("/reset")
-    obs = client.post("/reset").json()
-    email_id = obs["email_id"]
-
-    # call a tool using the canonical API
     resp = client.post("/step", json={
-        "command": "analyze_headers",
-        "params": {"email_id": email_id}
+        "command": "query_logs",
+        "params": {"query": "powershell"},
     })
     assert resp.status_code == 200
-    result = resp.json()
-    # normal tool call = step penalty (-0.05) + tool success (+0.1) = +0.05
-    # but if the email was Hard-tier with dynamic spoofing we also get the +0.2 verifier bonus
-    assert result["reward"] == pytest.approx(0.05) or result["reward"] == pytest.approx(0.25), \
-        f"Unexpected tool reward: {result['reward']}"
-    assert result["done"] is False
-    assert result["observation"]["success"] is True
-    assert result["observation"]["tool_used"] == "analyze_headers"
-    assert result["observation"]["tool_result"] is not None
-    assert "analyze_headers" in result["observation"]["tools_used"]
+    data = resp.json()
+    assert "observation" in data
+    assert "reward" in data
+    assert data["done"] is False
 
 
-def test_step_legacy_api():
-    """Old API shape (tool + parameters) should still work — we support both."""
+def test_step_get_host_summary():
     client.post("/reset")
-    obs = client.post("/reset").json()
-    email_id = obs["email_id"]
-
-    # same tool call but using the old key names
-    resp = client.post("/step", json={
-        "tool": "analyze_headers",
-        "parameters": {"email_id": email_id}
-    })
-    assert resp.status_code == 200
-    result = resp.json()
-    assert result["observation"]["success"] is True
-    assert result["observation"]["tool_result"] is not None
-
-
-def test_step_submit_verdict():
-    """Submit a verdict and check the episode actually ends and the label is revealed."""
-    client.post("/reset")
+    # First get the primary_host from reset
+    obs_resp = client.post("/reset")
+    primary = obs_resp.json()["primary_host"]
 
     resp = client.post("/step", json={
-        "command": "submit_verdict",
-        "params": {"verdict": "phishing"}
+        "command": "get_host_summary",
+        "params": {"host": primary},
     })
     assert resp.status_code == 200
-    result = resp.json()
-    assert result["done"] is True
-    assert result["observation"]["verdict_submitted"] is True
-    assert result["observation"]["final_verdict"] == "phishing"
-    assert result["observation"]["correct_label"] is not None
+    data = resp.json()
+    assert data["observation"]["tool_used"] == "get_host_summary"
 
+
+def test_step_analyze_process():
+    client.post("/reset")
+    resp = client.post("/step", json={
+        "command": "analyze_process",
+        "params": {"process_name": "powershell"},
+    })
+    assert resp.status_code == 200
+
+
+def test_step_check_ip_reputation():
+    client.post("/reset")
+    resp = client.post("/step", json={
+        "command": "check_ip_reputation",
+        "params": {"ip": "185.220.101.45"},
+    })
+    assert resp.status_code == 200
+    data = resp.json()
+    tool_result = data["observation"]["tool_result"]
+    assert tool_result is not None
+    assert "reputation_score" in tool_result
+
+
+def test_step_check_file_hash():
+    client.post("/reset")
+    resp = client.post("/step", json={
+        "command": "check_file_hash",
+        "params": {"hash": "da39a3ee5e6b4b0d3255bfef95601890afd80709"},
+    })
+    assert resp.status_code == 200
+
+
+def test_step_trigger_backup():
+    obs_resp = client.post("/reset")
+    primary = obs_resp.json()["primary_host"]
+    resp = client.post("/step", json={
+        "command": "trigger_backup",
+        "params": {"host": primary},
+    })
+    assert resp.status_code == 200
+    data = resp.json()
+    obs = data["observation"]
+    assert primary in obs["backup_triggered_hosts"]
+
+
+# ---------------------------------------------------------------------------
+# /step — invalid actions
+# ---------------------------------------------------------------------------
 
 def test_step_invalid_command_rejected():
-    """If the model hallucinates a tool name, the API should reject it immediately."""
     client.post("/reset")
-    resp = client.post("/step", json={
-        "command": "hack_the_planet",
-        "params": {}
-    })
-    assert resp.status_code == 422  # Pydantic validation error, not a crash
+    resp = client.post("/step", json={"command": "hack_the_planet", "params": {}})
+    assert resp.status_code == 422   # Pydantic validation error
 
 
-def test_step_missing_param_rejected():
-    """Calling sandbox_url without a URL should fail validation, not crash the environment."""
+def test_step_missing_required_param():
     client.post("/reset")
     resp = client.post("/step", json={
-        "command": "sandbox_url",
-        "params": {}   # forgot the url
+        "command": "query_logs",
+        "params": {},  # missing 'query'
     })
     assert resp.status_code == 422
 
 
-def test_state():
-    """GET /state should have everything the grader needs to score the episode."""
+def test_step_invalid_verdict():
+    client.post("/reset")
+    resp = client.post("/step", json={
+        "command": "submit_verdict",
+        "params": {"verdict": "destroy_everything"},
+    })
+    assert resp.status_code == 200  # env catches it, returns error_message
+    data = resp.json()
+    assert data["observation"]["success"] is False
+    assert data["done"] is False
+
+
+# ---------------------------------------------------------------------------
+# /state
+# ---------------------------------------------------------------------------
+
+def test_state_before_reset():
+    # Fresh client — no episode
+    from fastapi.testclient import TestClient
+    from server.app import app as fresh_app
+    import server.app as app_module
+    app_module._ENV = None
+    c = TestClient(fresh_app)
+    resp = c.get("/state")
+    assert resp.status_code == 400
+
+
+def test_state_after_reset():
     client.post("/reset")
     resp = client.get("/state")
     assert resp.status_code == 200
-    state = resp.json()
-    assert "step_count" in state
-    assert "expected_verdict" in state
-    assert "tools_used" in state
-    assert isinstance(state["tools_used"], list)
-    assert isinstance(state["expected_verdict"], bool)
+    st = resp.json()
+    assert "incident_id" in st
+    assert "expected_verdict" in st
+    assert "expected_attack_type" in st
+    assert st["step_count"] == 0
 
 
-def test_full_episode_cycle():
-    """Full loop: reset → call a tool → submit verdict → check state updated correctly."""
-    # start fresh
-    obs = client.post("/reset").json()
-    email_id = obs["email_id"]
-    assert obs["step_number"] == 0
+# ---------------------------------------------------------------------------
+# /grader
+# ---------------------------------------------------------------------------
 
-    # run a tool
-    r1 = client.post("/step", json={
-        "command": "analyze_headers",
-        "params": {"email_id": email_id}
-    }).json()
-    assert r1["observation"]["tool_result"] is not None
+def test_grader_before_verdict():
+    client.post("/reset")
+    resp = client.get("/grader")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["score"] == 0.0
+    assert data["correct"] is False
 
-    # submit a verdict to end the episode
-    r2 = client.post("/step", json={
+
+def test_grader_score_in_range():
+    client.post("/reset?tier_filter=Easy")
+    resp = client.get("/grader")
+    assert resp.status_code == 200
+    score = resp.json()["score"]
+    assert 0.0 <= score <= 1.0
+
+
+# ---------------------------------------------------------------------------
+# /tasks
+# ---------------------------------------------------------------------------
+
+def test_tasks_structure():
+    resp = client.get("/tasks")
+    assert resp.status_code == 200
+    data = resp.json()
+    tasks = data["tasks"]
+    assert len(tasks) == 3
+    tiers = {t["tier"] for t in tasks}
+    assert tiers == {"Easy", "Medium", "Hard"}
+
+
+def test_tasks_attack_types():
+    resp = client.get("/tasks")
+    data = resp.json()
+    attack_types = data["attack_types"]
+    assert "c2_beacon" in attack_types
+    assert "ransomware" in attack_types
+    assert "lateral_movement" in attack_types
+    assert "persistence" in attack_types
+    assert "data_exfil" in attack_types
+
+
+def test_tasks_action_schema():
+    resp = client.get("/tasks")
+    data = resp.json()
+    assert "action_schema" in data
+    schema = data["action_schema"]
+    assert "properties" in schema
+
+
+# ---------------------------------------------------------------------------
+# Full episode cycle
+# ---------------------------------------------------------------------------
+
+def test_full_easy_episode():
+    """Complete Easy episode: reset → tool call → backup → verdict → grader."""
+    obs_resp = client.post("/reset?tier_filter=Easy")
+    obs = obs_resp.json()
+    primary = obs["primary_host"]
+
+    # Tool call
+    client.post("/step", json={
+        "command": "query_logs",
+        "params": {"query": "powershell"},
+    })
+
+    # Trigger backup
+    client.post("/step", json={
+        "command": "trigger_backup",
+        "params": {"host": primary},
+    })
+
+    # Submit verdict
+    verdict_resp = client.post("/step", json={
         "command": "submit_verdict",
-        "params": {"verdict": "benign"}
-    }).json()
-    assert r2["done"] is True
+        "params": {
+            "verdict": "malicious",
+            "attack_type": "c2_beacon",
+            "affected_hosts": [primary],
+        },
+    })
+    data = verdict_resp.json()
+    assert data["done"] is True
+    assert data["reward"] is not None
 
-    # check the state reflects what just happened
-    state = client.get("/state").json()
-    assert state["verdict_submitted"] is True
-    assert len(state["tools_used"]) >= 1
+    # Grader
+    grade_resp = client.get("/grader")
+    assert grade_resp.status_code == 200
+    gdata = grade_resp.json()
+    assert 0.0 <= gdata["score"] <= 1.0
+    assert "expected_verdict" in gdata
+    assert "expected_attack_type" in gdata

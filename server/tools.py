@@ -1,297 +1,260 @@
 """
-Simulated SOC Tool Implementations.
+Simulated log-analysis tools for the SOC Log Triage Environment.
 
-Each tool is a pure function that accepts structured parameters and
-returns a Pydantic result model.  Tools read from the static data/
-JSON files so there are no live network calls — making the environment
-fully reproducible and deterministic (with controlled ±5 % noise).
+Each tool queries the triage_scenarios.db (incident_bundles, sysmon_endpoint_logs,
+threat_intel_ips, file_hashes tables) and returns a typed result dict.
+
+The `is_malicious` column is NEVER included in any result returned to the agent.
 """
-
 from __future__ import annotations
 
 import json
-import math
 import random
-from pathlib import Path
+import sqlite3
+import uuid
+from datetime import datetime, timezone
 from typing import Any
 
 from models import (
-    HeaderAnalysisResult,
-    SandboxResult,
-    ThreatIntelResult,
-    WhoisResult,
+    AnalyzeProcessResult,
+    BackupResult,
+    FileHashResult,
+    HostSummaryResult,
+    IPReputationResult,
+    LogEntry,
+    ProcessTreeNode,
+    QueryLogsResult,
 )
 
-# ---------------------------------------------------------------------------
-# Data loading helpers
-# ---------------------------------------------------------------------------
-
-# Use absolute data path relative to execution root
-_DATA_DIR = Path("data").resolve()
-
-
-def _load_emails() -> dict[str, Any]:
-    path = _DATA_DIR / "phishing_emails.json"
-    with path.open() as f:
-        emails: list[dict[str, Any]] = json.load(f)
-    return {e["id"]: e for e in emails}
+# Keep is_malicious out of everything the agent sees
+_SAFE_LOG_COLUMNS = (
+    "id", "host_id", "timestamp", "event_type", "process",
+    "commandline", "target_ip", "target_domain", "parent_process", "details"
+)
+_SAFE_SELECT = ", ".join(_SAFE_LOG_COLUMNS)
 
 
-def _load_threat_db() -> dict[str, Any]:
-    path = _DATA_DIR / "threat_intel_db.json"
-    with path.open() as f:
-        return json.load(f)
+def _row_to_log_entry(row: Any) -> LogEntry:
+    d = dict(zip(_SAFE_LOG_COLUMNS, row))
+    return LogEntry(**d)
 
 
-# Lazily loaded singletons
-_EMAIL_DB: dict[str, Any] | None = None
-_THREAT_DB: dict[str, Any] | None = None
-
-
-def _emails() -> dict[str, Any]:
-    global _EMAIL_DB
-    if _EMAIL_DB is None:
-        _EMAIL_DB = _load_emails()
-    return _EMAIL_DB
-
-
-def _threat() -> dict[str, Any]:
-    global _THREAT_DB
-    if _THREAT_DB is None:
-        _THREAT_DB = _load_threat_db()
-    return _THREAT_DB
-
-
-# ---------------------------------------------------------------------------
-# Noise helper
-# ---------------------------------------------------------------------------
-
-def _jitter(value: float, pct: float = 0.05) -> float:
-    """Add ±pct relative noise to a float while clamping to [0, 1]."""
-    delta = value * pct * random.uniform(-1.0, 1.0)
-    return round(min(1.0, max(0.0, value + delta)), 4)
-
-
-# ===========================================================================
-# Tool 1 — Email Header Analyzer
-# ===========================================================================
-
-def analyze_headers(
-    email_id: str,
-    _header_override: dict[str, Any] | None = None,
-) -> HeaderAnalysisResult:
+def _query_logs(params: dict[str, Any], db_conn: sqlite3.Connection,
+                log_ids: list[int]) -> dict[str, Any]:
     """
-    Parse email headers for email_id.
-
-    If *_header_override* is provided (injected by the environment when
-    the scenario was loaded from the Phase 2 SQLite DB), it is used
-    directly instead of looking up the JSON file.
-
-    Raises
-    ------
-    ValueError
-        If email_id is not found in the static dataset AND no override given.
+    Keyword search over the incident's log bundle.
+    Searches: process, commandline, target_domain, target_ip, parent_process, details.
     """
-    if _header_override:
-        headers = _header_override
-    else:
-        db = _emails()
-        if email_id not in db:
-            raise ValueError(
-                f"Unknown email_id: '{email_id}'. "
-                f"Valid IDs: {list(db.keys())}"
-            )
-        headers = db[email_id].get("header_data", {})
+    query = str(params.get("query", "")).strip()
+    if not query:
+        raise ValueError("'query' parameter is required and must be non-empty.")
 
-    flags: list[str] = list(headers.get("suspicious_flags", []))
+    t0 = random.randint(5, 80)
+    id_placeholders = ",".join("?" * len(log_ids))
+    pattern = f"%{query}%"
 
-    spf   = headers.get("spf_status",        "none")
-    dkim  = headers.get("dkim_status",        "none")
-    dmarc = headers.get("dmarc_status",       "none")
-    reply_mismatch = headers.get("reply_to_mismatch", False)
-
-    if spf.lower()   != "pass": flags.append("SPF_FAIL")
-    if dkim.lower()  != "pass": flags.append("DKIM_FAIL")
-    if dmarc.lower() != "pass": flags.append("DMARC_FAIL")
-    if reply_mismatch:           flags.append("REPLY_TO_MISMATCH")
-
-    return HeaderAnalysisResult(
-        spf_status=spf,
-        dkim_status=dkim,
-        dmarc_status=dmarc,
-        reply_to_mismatch=bool(reply_mismatch),
-        originating_ip=headers.get("originating_ip", "0.0.0.0"),
-        ip_geolocation=headers.get("ip_geolocation", "Unknown"),
-        suspicious_flags=list(set(flags)),
-    )
-
-
-# ===========================================================================
-# Tool 2 — Threat Intelligence Lookup
-# ===========================================================================
-
-def lookup_threat_intel(domain: str) -> ThreatIntelResult:
+    sql = f"""
+        SELECT {_SAFE_SELECT} FROM sysmon_endpoint_logs
+        WHERE id IN ({id_placeholders})
+          AND (
+            process       LIKE ? COLLATE NOCASE OR
+            commandline   LIKE ? COLLATE NOCASE OR
+            target_domain LIKE ? COLLATE NOCASE OR
+            target_ip     LIKE ? COLLATE NOCASE OR
+            parent_process LIKE ? COLLATE NOCASE OR
+            details       LIKE ? COLLATE NOCASE
+          )
+        ORDER BY timestamp
+        LIMIT 20
     """
-    Look up a domain (or bare IP) in the simulated threat-intel database.
-    Returns a default clean record if the domain is not known.
-    """
-    db = _threat()
-    domains: list[dict[str, Any]] = db.get("domains", [])
+    rows = db_conn.execute(sql, log_ids + [pattern] * 6).fetchall()
+    entries = [_row_to_log_entry(r) for r in rows]
 
-    # Exact match first, then substring match
-    record = next((d for d in domains if d["domain"] == domain), None)
-    if record is None:
-        record = next(
-            (d for d in domains if domain in d["domain"] or d["domain"] in domain),
-            None,
+    return QueryLogsResult(
+        query=query,
+        matches=entries,
+        total_found=len(entries),
+        query_time_ms=t0,
+    ).model_dump()
+
+
+def _analyze_process(params: dict[str, Any], db_conn: sqlite3.Connection,
+                     log_ids: list[int]) -> dict[str, Any]:
+    """
+    Return all log entries where process LIKE %<process_name>% inside this incident,
+    plus a simple parent→child tree.
+    """
+    proc_name = str(params.get("process_name", "")).strip()
+    if not proc_name:
+        raise ValueError("'process_name' parameter is required.")
+
+    id_placeholders = ",".join("?" * len(log_ids))
+    rows = db_conn.execute(
+        f"""SELECT {_SAFE_SELECT} FROM sysmon_endpoint_logs
+            WHERE id IN ({id_placeholders})
+              AND process LIKE ? COLLATE NOCASE
+            ORDER BY timestamp""",
+        log_ids + [f"%{proc_name}%"],
+    ).fetchall()
+
+    entries = [_row_to_log_entry(r) for r in rows]
+    hosts = list({e.host_id for e in entries})
+
+    # Build a shallow tree (one level of parent→child)
+    tree: list[ProcessTreeNode] = []
+    for e in entries:
+        node = ProcessTreeNode(
+            host_id=e.host_id,
+            process=e.process or "",
+            commandline=e.commandline,
+            parent_process=e.parent_process,
+            timestamp=e.timestamp,
         )
+        tree.append(node)
 
-    if record is None:
-        # Unknown domain — return a neutral record
-        return ThreatIntelResult(
-            domain=domain,
-            reputation_score=0.05,
-            known_malware_families=[],
-            first_seen="N/A",
-            last_seen="N/A",
-            tags=["unknown"],
-        )
-
-    return ThreatIntelResult(
-        domain=record["domain"],
-        reputation_score=_jitter(record.get("reputation_score", 0.1)),
-        known_malware_families=record.get("known_malware_families", []),
-        first_seen=record.get("first_seen", "N/A"),
-        last_seen=record.get("last_seen", "N/A"),
-        tags=record.get("tags", []),
-    )
+    return AnalyzeProcessResult(
+        process_name=proc_name,
+        hosts_seen_on=hosts,
+        tree=tree,
+        total_events=len(entries),
+    ).model_dump()
 
 
-# ===========================================================================
-# Tool 3 — URL Sandbox
-# ===========================================================================
+def _check_ip_reputation(params: dict[str, Any],
+                          db_conn: sqlite3.Connection) -> dict[str, Any]:
+    """Look up an IP in the threat_intel_ips table."""
+    ip = str(params.get("ip", "")).strip()
+    if not ip:
+        raise ValueError("'ip' parameter is required.")
 
-def sandbox_url(url: str) -> SandboxResult:
+    row = db_conn.execute(
+        """SELECT ip, reputation_score, category, country, asn, known_malware,
+                  first_seen, last_seen
+           FROM threat_intel_ips WHERE ip = ?""",
+        (ip,),
+    ).fetchone()
+
+    if row:
+        return IPReputationResult(
+            ip=ip, found=True,
+            reputation_score=row[1], category=row[2], country=row[3],
+            asn=row[4], known_malware=row[5], first_seen=row[6], last_seen=row[7],
+        ).model_dump()
+
+    # Not in DB — return clean result
+    return IPReputationResult(ip=ip, found=False, reputation_score=0.0,
+                               category="Unknown").model_dump()
+
+
+def _check_file_hash(params: dict[str, Any],
+                      db_conn: sqlite3.Connection) -> dict[str, Any]:
+    """Look up a file hash in the file_hashes IOC table."""
+    file_hash = str(params.get("hash", "")).strip()
+    if not file_hash:
+        raise ValueError("'hash' parameter is required.")
+
+    row = db_conn.execute(
+        "SELECT hash, filename, is_malicious, family, severity FROM file_hashes WHERE hash = ?",
+        (file_hash,),
+    ).fetchone()
+
+    if row:
+        return FileHashResult(
+            hash=file_hash, found=True, filename=row[1],
+            is_malicious=bool(row[2]), family=row[3], severity=row[4],
+        ).model_dump()
+
+    return FileHashResult(hash=file_hash, found=False, is_malicious=False).model_dump()
+
+
+def _get_host_summary(params: dict[str, Any], db_conn: sqlite3.Connection,
+                       log_ids: list[int]) -> dict[str, Any]:
+    """Return a summary of all activity on a specific host within this incident."""
+    host = str(params.get("host", "")).strip()
+    if not host:
+        raise ValueError("'host' parameter is required.")
+
+    id_placeholders = ",".join("?" * len(log_ids))
+    rows = db_conn.execute(
+        f"""SELECT {_SAFE_SELECT} FROM sysmon_endpoint_logs
+            WHERE id IN ({id_placeholders}) AND host_id = ?
+            ORDER BY timestamp""",
+        log_ids + [host],
+    ).fetchall()
+
+    if not rows:
+        raise ValueError(f"Host '{host}' not found in this incident bundle. "
+                         f"Check the host names from the initial_logs.")
+
+    entries = [_row_to_log_entry(r) for r in rows]
+
+    event_types: dict[str, int] = {}
+    processes: list[str] = []
+    ips: list[str] = []
+    domains: list[str] = []
+    for e in entries:
+        event_types[e.event_type] = event_types.get(e.event_type, 0) + 1
+        if e.process and e.process not in processes:
+            processes.append(e.process)
+        if e.target_ip and e.target_ip not in ips:
+            ips.append(e.target_ip)
+        if e.target_domain and e.target_domain not in domains:
+            domains.append(e.target_domain)
+
+    return HostSummaryResult(
+        host=host,
+        total_events=len(entries),
+        event_types=event_types,
+        processes_seen=processes[:20],
+        ips_contacted=ips[:10],
+        domains_contacted=domains[:10],
+        sample_logs=entries[:8],
+    ).model_dump()
+
+
+def _trigger_backup(params: dict[str, Any],
+                     db_conn: sqlite3.Connection) -> dict[str, Any]:
+    """Simulate triggering an emergency backup on a host."""
+    host = str(params.get("host", "")).strip()
+    if not host:
+        raise ValueError("'host' parameter is required.")
+
+    return BackupResult(
+        host=host,
+        status="initiated",
+        backup_id=str(uuid.uuid4()),
+        timestamp=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        message=f"Emergency snapshot initiated for {host}. ETA: ~3 minutes.",
+    ).model_dump()
+
+
+# ---------------------------------------------------------------------------
+# Public dispatch table
+# ---------------------------------------------------------------------------
+
+def run_tool(
+    tool_name: str,
+    params: dict[str, Any],
+    db_conn: sqlite3.Connection,
+    log_ids: list[int] | None = None,
+) -> dict[str, Any]:
     """
-    Detonate a URL in the simulated sandbox and return behavioral analysis.
-    Derives results from the threat-intel database when possible.
+    Dispatch a tool call and return a serialisable dict result.
+
+    Raises ValueError on bad params (caught by environment.step() for -0.1 penalty).
     """
-    # Strip protocol for domain extraction
-    domain = url.split("//")[-1].split("/")[0].split("?")[0]
+    log_ids = log_ids or []
 
-    db = _threat()
-    sandbox_records: list[dict[str, Any]] = db.get("sandbox_results", [])
-
-    record = next(
-        (r for r in sandbox_records if domain in r.get("url", "")),
-        None,
-    )
-
-    if record is None:
-        # Also try threat-intel reputation to infer risk
-        intel = lookup_threat_intel(domain)
-        score = intel.reputation_score
-        if score >= 0.8:
-            risk = "critical"
-        elif score >= 0.6:
-            risk = "high"
-        elif score >= 0.3:
-            risk = "medium"
-        else:
-            risk = "low"
-
-        return SandboxResult(
-            url=url,
-            redirects_to=[],
-            page_title="",
-            credential_harvesting_detected=score >= 0.7,
-            malware_download_detected=score >= 0.85,
-            risk_level=risk,
-        )
-
-    return SandboxResult(
-        url=url,
-        redirects_to=record.get("redirects_to", []),
-        page_title=record.get("page_title", ""),
-        credential_harvesting_detected=record.get("credential_harvesting_detected", False),
-        malware_download_detected=record.get("malware_download_detected", False),
-        risk_level=record.get("risk_level", "low"),
-    )
-
-
-# ===========================================================================
-# Tool 4 — WHOIS Lookup
-# ===========================================================================
-
-def whois_lookup(domain: str) -> WhoisResult:
-    """
-    Return simulated WHOIS registration data for a domain.
-    """
-    db = _threat()
-    whois_records: list[dict[str, Any]] = db.get("whois_records", [])
-
-    record = next(
-        (r for r in whois_records if r.get("domain", "") == domain),
-        None,
-    )
-
-    if record is None:
-        # Supply a plausible default for unknown domains
-        return WhoisResult(
-            domain=domain,
-            registrar="Unknown Registrar",
-            creation_date="2020-01-01",
-            expiry_date="2026-01-01",
-            registrant_country="Unknown",
-            privacy_protected=False,
-            age_days=math.floor((2026 - 2020) * 365),
-        )
-
-    return WhoisResult(
-        domain=record["domain"],
-        registrar=record.get("registrar", "Unknown"),
-        creation_date=record.get("creation_date", "N/A"),
-        expiry_date=record.get("expiry_date", "N/A"),
-        registrant_country=record.get("registrant_country", "Unknown"),
-        privacy_protected=record.get("privacy_protected", False),
-        age_days=record.get("age_days", 0),
-    )
-
-
-# ===========================================================================
-# Dispatcher
-# ===========================================================================
-
-def run_tool(tool_name: str, parameters: dict[str, Any]) -> dict[str, Any]:
-    """
-    Dispatch a tool call by name and return the result as a plain dict.
-
-    Parameters
-    ----------
-    tool_name:
-        One of the ToolName enum values (string form).
-    parameters:
-        Tool-specific keyword arguments.
-
-    Returns
-    -------
-    dict
-        The Pydantic model serialised to a plain dict.
-    """
     dispatch = {
-        "analyze_headers":     lambda p: analyze_headers(
-            p["email_id"],
-            _header_override=p.get("_header_override"),
-        ),
-        "lookup_threat_intel": lambda p: lookup_threat_intel(p["domain"]),
-        "sandbox_url":         lambda p: sandbox_url(p["url"]),
-        "whois_lookup":        lambda p: whois_lookup(p["domain"]),
+        "query_logs":          lambda: _query_logs(params, db_conn, log_ids),
+        "analyze_process":     lambda: _analyze_process(params, db_conn, log_ids),
+        "check_ip_reputation": lambda: _check_ip_reputation(params, db_conn),
+        "check_file_hash":     lambda: _check_file_hash(params, db_conn),
+        "get_host_summary":    lambda: _get_host_summary(params, db_conn, log_ids),
+        "trigger_backup":      lambda: _trigger_backup(params, db_conn),
     }
 
-    if tool_name not in dispatch:
-        raise ValueError(
-            f"Unknown tool '{tool_name}'. Valid tools: {list(dispatch.keys())}"
-        )
-
-    result = dispatch[tool_name](parameters)
-    return result.model_dump()
+    handler = dispatch.get(tool_name)
+    if handler is None:
+        raise ValueError(f"Unknown tool '{tool_name}'.")
+    return handler()
