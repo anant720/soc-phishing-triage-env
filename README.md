@@ -2,7 +2,7 @@
 title: Autonomous SOC Endpoint Log Triage (OpenEnv)
 emoji: 🔍
 colorFrom: red
-colorTo: orange
+colorTo: yellow
 sdk: docker
 pinned: true
 tags:
