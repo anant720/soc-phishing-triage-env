@@ -207,16 +207,26 @@ Penalties (pre-clamp, can take score negative, clamped to [0, 1]):
 ```bash
 git clone <repo-url> && cd soc-log-triage-env
 
-# Install (uv recommended)
-uv venv && source .venv/bin/activate
-uv pip install -e ".[dev]"
+# Start the environment server (FastAPI, port 7860)
 PYTHONPATH=. uvicorn server.app:app --host 0.0.0.0 --port 7860
-# → http://localhost:7860/docs (Swagger UI)
-# → http://localhost:7860/health
-
-# OR start the interactive Gradio demo
-PYTHONPATH=. python gradio_demo.py
 ```
+
+### 🎨 Running the Interactive UI
+
+To protect `openenv validate` compatibility, this environment serves the raw REST API by default. We have also built a beautiful **fully-featured Gradio frontend** for humans to watch the agent work in real-time. 
+
+To launch the UI locally:
+```bash
+PYTHONPATH=. python gradio_demo.py
+# → http://localhost:7860
+```
+
+To launch the UI via Docker:
+```bash
+docker build -t soc-env .
+docker run -p 7860:7860 -e GRADIO_DEMO=1 soc-env
+```
+
 
 ### Environment Variables
 
