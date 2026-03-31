@@ -27,8 +27,7 @@ COPY --chown=user . .
 # Python module resolution
 ENV PYTHONPATH=/home/user/app
 
-# Build incident DB if not already present
-RUN python data/build_incidents.py
+# (DB is pre-built and included as data/triage_scenarios.db)
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
     CMD curl -f http://localhost:7860/health || exit 1

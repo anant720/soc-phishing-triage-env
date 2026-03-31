@@ -63,8 +63,7 @@ soc-log-triage-env/
 ├── train.py               # In-context RL training loop (ICPG)
 │
 ├── data/
-│   ├── build_incidents.py # Procedural incident generator (5 attack types × 3 tiers)
-│   └── triage_scenarios.db# SQLite: 340 incidents, 53,645 Sysmon log rows
+│   └── triage_scenarios.db# SQLite: 340 pre-generated incidents, 53,645 Sysmon log rows
 │
 ├── server/
 │   ├── app.py             # FastAPI routes (reset/step/state/grader/tasks/health)
@@ -211,8 +210,6 @@ git clone <repo-url> && cd soc-log-triage-env
 # Install (uv recommended)
 uv venv && source .venv/bin/activate
 uv pip install -e ".[dev]"
-
-# Start the environment server (FastAPI, port 7860)
 PYTHONPATH=. uvicorn server.app:app --host 0.0.0.0 --port 7860
 # → http://localhost:7860/docs (Swagger UI)
 # → http://localhost:7860/health
